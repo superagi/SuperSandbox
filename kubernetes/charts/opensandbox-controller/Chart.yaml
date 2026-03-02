@@ -24,7 +24,7 @@ maintainers:
 icon: https://raw.githubusercontent.com/alibaba/OpenSandbox/main/kubernetes/images/logo.png
 
 # Kubernetes version constraints
-kubeVersion: ">=1.22.4-0"
+kubeVersion: ">=1.20.0-0"
 
 annotations:
   # Category for Artifact Hub
