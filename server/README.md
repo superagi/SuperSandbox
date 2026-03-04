@@ -126,6 +126,46 @@ Before you start the server, edit the configuration file to suit your environmen
    ```
    Further reading on Docker container security: https://docs.docker.com/engine/security/
 
+**Secure container runtime (optional)**
+
+OpenSandbox supports secure container runtimes for enhanced isolation:
+
+```toml
+[secure_runtime]
+type = "gvisor"              # Options: "", "gvisor", "kata", "firecracker"
+docker_runtime = "runsc"      # Docker OCI runtime name (for gVisor, Kata)
+# k8s_runtime_class = "gvisor"  # Kubernetes RuntimeClass name (for K8s)
+```
+
+- `type=""` (default): No secure runtime, uses runc
+- `type="gvisor"`: Uses gVisor (runsc) for user-space kernel isolation
+- `type="kata"`: Uses Kata Containers for VM-level isolation
+- `type="firecracker"`: Uses Firecracker microVM (Kubernetes only)
+
+> **Detailed guide**: See [Secure Container Runtime Guide](../docs/secure-container.md) for complete installation instructions, system requirements, and troubleshooting.
+
+**Docker daemon setup** for gVisor:
+```json
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/bin/runsc"
+    }
+  }
+}
+```
+
+**Kubernetes setup**: Create RuntimeClass before using:
+```bash
+kubectl create -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+EOF
+```
+
 **Ingress exposure (direct | gateway)**
    ```toml
    [ingress]

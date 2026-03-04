@@ -127,6 +127,46 @@ opensandbox-server init-config ~/.sandbox.toml --example k8s-zh
    ```
    更多 Docker 容器安全参考：https://docs.docker.com/engine/security/
 
+**安全容器运行时（可选）**
+
+OpenSandbox 支持安全容器运行时以增强隔离性：
+
+```toml
+[secure_runtime]
+type = "gvisor"              # 选项: "", "gvisor", "kata", "firecracker"
+docker_runtime = "runsc"      # Docker OCI 运行时名称（用于 gVisor、Kata）
+# k8s_runtime_class = "gvisor"  # Kubernetes RuntimeClass 名称（用于 K8s）
+```
+
+- `type=""`（默认）：不使用安全运行时，使用 runc
+- `type="gvisor"`：使用 gVisor (runsc) 实现用户态内核隔离
+- `type="kata"`：使用 Kata Containers 实现 VM 级隔离
+- `type="firecracker"`：使用 Firecracker 微虚拟机（仅 Kubernetes）
+
+> **详细指南**：参阅 [安全容器运行时指南](../docs/secure-container.md) 获取完整的安装说明、系统要求和故障排除。
+
+**Docker daemon 配置** gVisor 示例：
+```json
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/bin/runsc"
+    }
+  }
+}
+```
+
+**Kubernetes 配置**：使用前需先创建 RuntimeClass：
+```bash
+kubectl create -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+EOF
+```
+
 **Ingress 暴露（direct | gateway）**
 ```toml
 [ingress]
