@@ -38,11 +38,14 @@ from src.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
     SandboxStatus,
+    UpdateSandboxResourceLimitsRequest,
+    UpdateSandboxResourceLimitsResponse,
 )
 from src.config import AppConfig, get_config
 from src.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_ID_LABEL,
+    SANDBOX_LAST_ACTIVITY_AT_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SandboxErrorCodes,
 )
@@ -287,6 +290,7 @@ class KubernetesSandboxService(SandboxService):
         # Build labels
         labels = {
             SANDBOX_ID_LABEL: sandbox_id,
+            SANDBOX_LAST_ACTIVITY_AT_LABEL: str(int(created_at.timestamp())),
         }
         annotations: Dict[str, str] = {}
         if expires_at is None:
@@ -648,6 +652,195 @@ class KubernetesSandboxService(SandboxService):
                 },
             ) from e
     
+    def update_resource_limits(
+        self,
+        sandbox_id: str,
+        request: UpdateSandboxResourceLimitsRequest,
+    ) -> UpdateSandboxResourceLimitsResponse:
+        """
+        Update resource limits on a running or paused sandbox.
+
+        For CPU/memory: patches the workload CRD spec so the controller applies changes.
+        For storage: expands the workspace PVC (shrink is rejected).
+        """
+        try:
+            workload = self.workload_provider.get_workload(
+                sandbox_id=sandbox_id,
+                namespace=self.namespace,
+            )
+            if not workload:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                        "message": f"Sandbox '{sandbox_id}' not found",
+                    },
+                )
+
+            status_info = self.workload_provider.get_status(workload)
+            if status_info["state"] not in ("Running", "Paused"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_INVALID_STATE,
+                        "message": (
+                            f"Cannot update resources in state '{status_info['state']}'. "
+                            "Must be Running or Paused."
+                        ),
+                    },
+                )
+
+            limits = request.resource_limits
+            result_limits: Dict[str, str] = {}
+
+            # Handle CPU/memory update via workload provider
+            compute_updates: Dict[str, str] = {}
+            if limits.cpu is not None:
+                compute_updates["cpu"] = limits.cpu
+            if limits.memory is not None:
+                compute_updates["memory"] = limits.memory
+
+            if compute_updates:
+                self.workload_provider.update_resource_limits(
+                    sandbox_id=sandbox_id,
+                    namespace=self.namespace,
+                    resource_limits=compute_updates,
+                )
+                result_limits.update(compute_updates)
+
+            # Handle storage expansion via PVC patch
+            if limits.storage is not None:
+                self._expand_workspace_storage(
+                    sandbox_id=sandbox_id,
+                    new_size=limits.storage,
+                )
+                result_limits["storage"] = limits.storage
+
+            # Re-read workload to get current resource state
+            workload = self.workload_provider.get_workload(
+                sandbox_id=sandbox_id,
+                namespace=self.namespace,
+            )
+            status_info = self.workload_provider.get_status(workload)
+
+            # Build complete resource limits from workload spec
+            current_limits = self._extract_resource_limits(workload)
+            current_limits.update(result_limits)
+
+            logger.info(
+                "Updated resource limits for sandbox %s: %s",
+                sandbox_id,
+                result_limits,
+            )
+
+            return UpdateSandboxResourceLimitsResponse(
+                id=sandbox_id,
+                status=SandboxStatus(
+                    state=status_info["state"],
+                    reason=status_info["reason"],
+                    message=status_info["message"],
+                    last_transition_at=status_info["last_transition_at"],
+                ),
+                resource_limits=current_limits,
+            )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating resource limits for {sandbox_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_RESOURCE_UPDATE_FAILED,
+                    "message": f"Failed to update resource limits: {str(e)}",
+                },
+            ) from e
+
+    def _expand_workspace_storage(self, sandbox_id: str, new_size: str) -> None:
+        """Expand the workspace PVC for a sandbox.
+
+        Raises HTTPException if:
+        - PVC not found
+        - New size is smaller than current (shrink not supported)
+        - StorageClass does not allow volume expansion
+        """
+        from src.services.k8s.resource_utils import parse_k8s_quantity
+
+        # Find workspace PVC
+        pvc_name = f"workspace-{sandbox_id}"
+        pvc = self.k8s_client.get_pvc(self.namespace, pvc_name)
+        if pvc is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_PVC_EXPAND_FAILED,
+                    "message": f"Workspace PVC '{pvc_name}' not found for sandbox '{sandbox_id}'",
+                },
+            )
+
+        # Check current size
+        current_size_str = pvc.spec.resources.requests.get("storage", "0")
+        current_bytes = parse_k8s_quantity(current_size_str)
+        new_bytes = parse_k8s_quantity(new_size)
+
+        if new_bytes < current_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.K8S_PVC_SHRINK_NOT_SUPPORTED,
+                    "message": (
+                        f"Cannot shrink storage from {current_size_str} to {new_size}. "
+                        "Only expansion is supported."
+                    ),
+                },
+            )
+
+        if new_bytes == current_bytes:
+            return  # No-op
+
+        # Check StorageClass supports expansion
+        sc_name = pvc.spec.storage_class_name
+        if sc_name:
+            sc = self.k8s_client.get_storage_class(sc_name)
+            if sc and not getattr(sc, "allow_volume_expansion", False):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_VOLUME_EXPANSION_NOT_SUPPORTED,
+                        "message": (
+                            f"StorageClass '{sc_name}' does not support volume expansion. "
+                            "Set allowVolumeExpansion: true on the StorageClass."
+                        ),
+                    },
+                )
+
+        # Patch PVC
+        self.k8s_client.patch_pvc(
+            namespace=self.namespace,
+            name=pvc_name,
+            body={
+                "spec": {
+                    "resources": {
+                        "requests": {
+                            "storage": new_size,
+                        }
+                    }
+                }
+            },
+        )
+
+    def _extract_resource_limits(self, workload: Any) -> Dict[str, str]:
+        """Extract current resource limits from a workload spec."""
+        if isinstance(workload, dict):
+            spec = workload.get("spec", {})
+            template = spec.get("template", spec.get("podTemplate", {}))
+            pod_spec = template.get("spec", {})
+            containers = pod_spec.get("containers", [])
+            if containers:
+                resources = containers[0].get("resources", {})
+                return dict(resources.get("limits", {}))
+        return {}
+
     def renew_expiration(
         self,
         sandbox_id: str,
@@ -864,6 +1057,143 @@ class KubernetesSandboxService(SandboxService):
             command=[command],
         )
 
+    # ------------------------------------------------------------------
+    # Task execution (via execd)
+    # ------------------------------------------------------------------
+
+    def submit_task(
+        self,
+        sandbox_id: str,
+        command: str,
+        cwd: str = "/workspace",
+        timeout_ms: Optional[int] = None,
+        envs: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Submit a background task to a sandbox via execd."""
+        pod_name = self.get_sandbox_pod_name(sandbox_id)
+
+        body: Dict[str, Any] = {
+            "command": command,
+            "cwd": cwd,
+            "background": True,
+        }
+        if timeout_ms is not None:
+            body["timeout"] = timeout_ms
+        if envs:
+            body["envs"] = envs
+
+        result = self.k8s_client.call_execd_submit(
+            namespace=self.namespace,
+            pod_name=pod_name,
+            json_body=body,
+        )
+
+        if result.get("status_code") != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": SandboxErrorCodes.K8S_API_ERROR,
+                    "message": f"execd returned error: {result.get('body')}",
+                },
+            )
+
+        return {
+            "taskId": result.get("task_id"),
+            "status": "running",
+        }
+
+    def get_task_status(self, sandbox_id: str, task_id: str) -> Dict[str, Any]:
+        """Get task status from execd."""
+        pod_name = self.get_sandbox_pod_name(sandbox_id)
+
+        result = self.k8s_client.call_execd(
+            namespace=self.namespace,
+            pod_name=pod_name,
+            method="GET",
+            path=f"/command/status/{task_id}",
+        )
+
+        if result["status_code"] == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "TASK::NOT_FOUND",
+                    "message": f"Task '{task_id}' not found",
+                },
+            )
+        return result["body"]
+
+    def get_task_logs(
+        self,
+        sandbox_id: str,
+        task_id: str,
+        cursor: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Get task logs from execd with cursor-based pagination."""
+        pod_name = self.get_sandbox_pod_name(sandbox_id)
+
+        params = {}
+        if cursor is not None:
+            params["cursor"] = cursor
+
+        result = self.k8s_client.call_execd(
+            namespace=self.namespace,
+            pod_name=pod_name,
+            method="GET",
+            path=f"/command/{task_id}/logs",
+            params=params if params else None,
+        )
+
+        if result["status_code"] == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "TASK::NOT_FOUND",
+                    "message": f"Task '{task_id}' not found",
+                },
+            )
+
+        return {
+            "body": result["body"],
+            "cursor": result["headers"].get("execd-commands-tail-cursor") or result["headers"].get("Execd-Commands-Tail-Cursor"),
+        }
+
+    def kill_task(self, sandbox_id: str, task_id: str) -> None:
+        """Kill a running task via execd."""
+        pod_name = self.get_sandbox_pod_name(sandbox_id)
+
+        result = self.k8s_client.call_execd(
+            namespace=self.namespace,
+            pod_name=pod_name,
+            method="DELETE",
+            path="/command",
+            params={"id": task_id},
+        )
+
+        if result["status_code"] == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "TASK::NOT_FOUND",
+                    "message": f"Task '{task_id}' not found",
+                },
+            )
+
+    def touch_last_activity(self, sandbox_id: str) -> None:
+        """Best-effort update of sandbox last activity label on workload metadata."""
+        try:
+            self.workload_provider.touch_last_activity(
+                sandbox_id=sandbox_id,
+                namespace=self.namespace,
+                timestamp=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.debug(
+                "Failed to update last activity label for sandbox %s",
+                sandbox_id,
+                exc_info=True,
+            )
+
     def _attach_egress_auth_headers(self, endpoint: Endpoint, workload: Any) -> None:
         token = self._get_egress_auth_token(workload)
         if not token:
@@ -943,7 +1273,21 @@ class KubernetesSandboxService(SandboxService):
                 entrypoint = container.command or []
         
         image_spec = ImageSpec(uri=image_uri) if image_uri else ImageSpec(uri="unknown")
-        
+
+        # Extract last_activity_at from labels
+        last_activity_at = None
+        last_activity_raw = labels.get(SANDBOX_LAST_ACTIVITY_AT_LABEL)
+        if last_activity_raw:
+            try:
+                # K8s stores as unix epoch seconds
+                last_activity_at = datetime.fromtimestamp(int(last_activity_raw), tz=timezone.utc)
+            except (ValueError, TypeError):
+                try:
+                    # Fallback: try ISO format
+                    last_activity_at = datetime.fromisoformat(last_activity_raw)
+                except (ValueError, TypeError):
+                    pass
+
         return Sandbox(
             id=sandbox_id,
             status=SandboxStatus(
@@ -954,6 +1298,7 @@ class KubernetesSandboxService(SandboxService):
             ),
             created_at=creation_timestamp,
             expires_at=expires_at,
+            last_activity_at=last_activity_at,
             metadata=user_metadata if user_metadata else None,
             image=image_spec,
             entrypoint=entrypoint,

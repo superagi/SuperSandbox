@@ -1,0 +1,35 @@
+# Minikube + gVisor using the host Docker daemon.
+#
+# You already have `gcr.io/k8s-minikube/kicbase` locally — that image is the *node*
+# Minikube creates; it is NOT the Minikube CLI. There is no reliable public image at
+# `gcr.io/k8s-minikube/minikube:<tag>` for running the CLI in a container, so this
+# compose uses a small Debian base you likely have (`devcontainers/base:bookworm`),
+# installs Minikube once at startup, then enables gVisor + RuntimeClass `gvisor`.
+#
+# Usage:
+#   docker compose -f docker-compose.minikube-gvisor.yml up
+#
+# Verify on host:
+#   kubectl --kubeconfig ~/.kube/config get runtimeclass
+#
+services:
+  minikube-gvisor:
+    image: mcr.microsoft.com/devcontainers/base:bookworm
+    container_name: minikube-gvisor
+    privileged: true
+    tty: true
+    stdin_open: true
+    environment:
+      MINIKUBE_IN_STYLE: "false"  
+      KUBECONFIG: /root/.kube/config
+      # Optional overrides:
+      # MINIKUBE_PROFILE: "opensandbox-gvisor"
+      # MINIKUBE_CPUS: "2"
+      # MINIKUBE_MEMORY: "3072"
+      # MINIKUBE_KUBERNETES_VERSION: "stable"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/.kube:/root/.kube
+      - ${HOME}/.minikube:/root/.minikube
+      - ./scripts/minikube-gvisor-bootstrap.sh:/bootstrap.sh:ro
+    command: ["bash", "/bootstrap.sh"]

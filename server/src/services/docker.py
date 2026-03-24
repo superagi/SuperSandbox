@@ -64,6 +64,7 @@ from src.services.constants import (
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_HTTP_PORT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_LAST_ACTIVITY_AT_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_OSSFS_MOUNTS_LABEL,
     SandboxErrorCodes,
@@ -609,7 +610,7 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
         metadata = {
             key: value
             for key, value in labels.items()
-            if key not in {SANDBOX_ID_LABEL, SANDBOX_EXPIRES_AT_LABEL, SANDBOX_MANUAL_CLEANUP_LABEL}
+            if key not in {SANDBOX_ID_LABEL, SANDBOX_EXPIRES_AT_LABEL, SANDBOX_MANUAL_CLEANUP_LABEL, SANDBOX_LAST_ACTIVITY_AT_LABEL}
         } or None
         entrypoint = container.attrs.get("Config", {}).get("Cmd") or []
         if isinstance(entrypoint, str):
@@ -626,6 +627,9 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
         )
         expires_at = self._get_tracked_expiration(resolved_id, labels)
 
+        last_activity_at_raw = labels.get(SANDBOX_LAST_ACTIVITY_AT_LABEL)
+        last_activity_at = parse_timestamp(last_activity_at_raw) if last_activity_at_raw else None
+
         status_info = SandboxStatus(
             state=state,
             reason=reason,
@@ -641,6 +645,7 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
             entrypoint=entrypoint,
             expiresAt=expires_at,
             createdAt=created_at,
+            lastActivityAt=last_activity_at,
         )
 
     def _ensure_directory(self, container, path: str, sandbox_id: Optional[str] = None) -> None:
@@ -877,6 +882,7 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
             entrypoint=pending.request.entrypoint,
             expiresAt=pending.expires_at,
             createdAt=pending.created_at,
+            lastActivityAt=pending.created_at,
         )
 
     def _update_container_labels(self, container, labels: Dict[str, str]) -> None:
@@ -1793,6 +1799,42 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
         """Open terminal to a Docker sandbox container."""
         raise NotImplementedError("Terminal is not yet implemented for Docker runtime")
 
+    def submit_task(self, sandbox_id, command, cwd="/workspace", timeout_ms=None, envs=None):
+        raise NotImplementedError("Tasks are not yet implemented for Docker runtime")
+
+    def get_task_status(self, sandbox_id, task_id):
+        raise NotImplementedError("Tasks are not yet implemented for Docker runtime")
+
+    def get_task_logs(self, sandbox_id, task_id, cursor=None):
+        raise NotImplementedError("Tasks are not yet implemented for Docker runtime")
+
+    def kill_task(self, sandbox_id, task_id):
+        raise NotImplementedError("Tasks are not yet implemented for Docker runtime")
+
+    def update_resource_limits(self, sandbox_id, request):
+        """Resource limit updates are not supported for Docker runtime."""
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail={
+                "code": SandboxErrorCodes.API_NOT_SUPPORTED,
+                "message": "Updating resource limits is not supported for Docker runtime",
+            },
+        )
+
+    def touch_last_activity(self, sandbox_id: str) -> None:
+        """Best-effort update of sandbox last-activity label."""
+        try:
+            container = self._get_container_by_sandbox_id(sandbox_id)
+            labels = container.attrs.get("Config", {}).get("Labels") or {}
+            labels[SANDBOX_LAST_ACTIVITY_AT_LABEL] = datetime.now(timezone.utc).isoformat()
+            self._update_container_labels(container, labels)
+        except Exception:
+            logger.debug(
+                "Failed to update last activity label for sandbox %s",
+                sandbox_id,
+                exc_info=True,
+            )
+
     def _attach_egress_auth_headers(
         self,
         endpoint: Endpoint,
@@ -1862,6 +1904,7 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
         metadata = request.metadata or {}
         labels = {key: str(value) for key, value in metadata.items()}
         labels[SANDBOX_ID_LABEL] = sandbox_id
+        labels[SANDBOX_LAST_ACTIVITY_AT_LABEL] = datetime.now(timezone.utc).isoformat()
         if expires_at is None:
             labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"
         else:

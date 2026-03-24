@@ -40,6 +40,8 @@ from src.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
     SandboxFilter,
+    UpdateSandboxResourceLimitsRequest,
+    UpdateSandboxResourceLimitsResponse,
 )
 from src.services.factory import create_sandbox_service
 
@@ -244,6 +246,46 @@ async def delete_sandbox(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.patch(
+    "/sandboxes/{sandbox_id}",
+    response_model=UpdateSandboxResourceLimitsResponse,
+    response_model_by_alias=True,
+    responses={
+        200: {"description": "Resource limits updated successfully"},
+        400: {"model": ErrorResponse, "description": "Invalid resource format or storage shrink attempted"},
+        404: {"model": ErrorResponse, "description": "Sandbox not found"},
+        409: {"model": ErrorResponse, "description": "Sandbox in a state that doesn't allow updates"},
+        422: {"model": ErrorResponse, "description": "StorageClass doesn't support volume expansion"},
+        500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
+    },
+)
+async def update_sandbox_resource_limits(
+    sandbox_id: str,
+    request: UpdateSandboxResourceLimitsRequest,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
+) -> UpdateSandboxResourceLimitsResponse:
+    """
+    Update resource limits on a running or paused sandbox.
+
+    Allows updating CPU, memory, and storage limits. All fields in resourceLimits
+    are optional — only provided fields are updated.
+
+    For CPU & memory: updates the container's resource limits/requests on the
+    underlying pod via the workload controller.
+
+    For storage: expands the workspace PVC. Shrinking is not supported.
+
+    Args:
+        sandbox_id: Unique sandbox identifier
+        request: Resource limits update request
+        x_request_id: Unique request identifier for tracing (optional).
+
+    Returns:
+        UpdateSandboxResourceLimitsResponse: Updated sandbox state and resource limits
+    """
+    return sandbox_service.update_resource_limits(sandbox_id, request)
+
+
 # ============================================================================
 # Sandbox Lifecycle Operations
 # ============================================================================
@@ -265,20 +307,11 @@ async def pause_sandbox(
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> Response:
     """
-    Pause execution while retaining state.
+    Pause a running sandbox.
 
-    Pauses a running sandbox while preserving its state.
-    Poll GET /sandboxes/{sandboxId} to track state transition to Paused.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Response: 202 Accepted
-
-    Raises:
-        HTTPException: If sandbox not found or cannot be paused
+    Scales the sandbox pod to zero while preserving the workspace PVC.
+    All data in /workspace survives the pause. The sandbox must be in Running state.
+    Returns 409 if the sandbox is not currently Running.
     """
     # Delegate to the service layer for pause orchestration
     sandbox_service.pause_sandbox(sandbox_id)
@@ -304,18 +337,9 @@ async def resume_sandbox(
     """
     Resume a paused sandbox.
 
-    Resumes execution of a paused sandbox.
-    Poll GET /sandboxes/{sandboxId} to track state transition to Running.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Response: 202 Accepted
-
-    Raises:
-        HTTPException: If sandbox not found or cannot be resumed
+    Recreates the sandbox pod and remounts the workspace PVC at /workspace.
+    All data written before pause is available again. The sandbox must be in Paused state.
+    Returns 409 if the sandbox is not currently Paused.
     """
     # Delegate to the service layer for resume orchestration
     sandbox_service.resume_sandbox(sandbox_id)
@@ -427,6 +451,7 @@ async def proxy_sandbox_endpoint_request(request: Request, sandbox_id: str, port
     and asynchronously proxies the request to it.
     """
 
+    _touch_sandbox_activity(sandbox_id)
     endpoint = sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
 
     target_host = endpoint.endpoint
@@ -508,6 +533,18 @@ async def proxy_sandbox_endpoint_request(request: Request, sandbox_id: str, port
 _lifecycle_logger = logging.getLogger(__name__)
 
 
+def _touch_sandbox_activity(sandbox_id: str) -> None:
+    """Best-effort activity marker update."""
+    try:
+        sandbox_service.touch_last_activity(sandbox_id)
+    except Exception:
+        _lifecycle_logger.debug(
+            "Failed to touch activity for sandbox %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
 @router.get(
     "/sandboxes/{sandbox_id}/logs",
     responses={
@@ -527,7 +564,11 @@ async def get_sandbox_logs(
     Get logs from a sandbox pod.
 
     Returns the stdout/stderr output of the sandbox container.
-    Use follow=true for real-time streaming via Server-Sent Events.
+
+    - `tail`: Number of lines from the end (default 100, max 10000)
+    - `follow`: If true, streams logs in real time (text/plain chunked response)
+
+    Returns 404 if sandbox or pod not found. Returns 409 if sandbox is paused.
     """
     if follow:
         resp = sandbox_service.get_sandbox_logs(
@@ -562,10 +603,18 @@ async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
     """
     Interactive WebSocket terminal to a sandbox pod.
 
-    Opens an interactive shell (bash) in the sandbox container.
-    Clients send keystrokes as text, receive terminal output as text.
+    Opens an interactive bash shell (PTY) in the sandbox container via WebSocket.
+
+    - Connect: `ws://<host>/sandboxes/{sandbox_id}/terminal`
+    - Send: text messages (keystrokes)
+    - Receive: text messages (terminal output including ANSI escape codes)
+    - Close codes: 1008 (sandbox not found/paused), 1011 (internal error)
+
+    Compatible with xterm.js or any WebSocket terminal emulator.
+    Returns close frame with reason if sandbox is not running.
     """
     await websocket.accept()
+    _touch_sandbox_activity(sandbox_id)
 
     try:
         ws_client = sandbox_service.exec_sandbox_terminal(sandbox_id)
@@ -587,6 +636,7 @@ async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
             while ws_client.is_open():
                 data = await asyncio.to_thread(ws_client.read_stdout, timeout=1)
                 if data:
+                    _touch_sandbox_activity(sandbox_id)
                     await websocket.send_text(data)
         except WebSocketDisconnect:
             pass
@@ -598,18 +648,29 @@ async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
         try:
             while True:
                 data = await websocket.receive_text()
+                _touch_sandbox_activity(sandbox_id)
                 ws_client.write_stdin(data)
         except WebSocketDisconnect:
             pass
         except Exception as e:
             _lifecycle_logger.debug("WebSocket write loop ended: %s", e)
 
+    async def periodic_activity_touch():
+        """Periodic heartbeat while terminal session is active."""
+        try:
+            while ws_client.is_open():
+                await asyncio.sleep(30)
+                _touch_sandbox_activity(sandbox_id)
+        except Exception:
+            pass
+
     read_task = asyncio.create_task(read_from_k8s())
     write_task = asyncio.create_task(write_to_k8s())
+    heartbeat_task = asyncio.create_task(periodic_activity_touch())
 
     try:
         done, pending = await asyncio.wait(
-            [read_task, write_task],
+            [read_task, write_task, heartbeat_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
@@ -620,3 +681,130 @@ async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
             await websocket.close()
         except Exception:
             pass
+
+
+# ============================================================================
+# Task Execution
+# ============================================================================
+
+@router.post(
+    "/sandboxes/{sandbox_id}/tasks",
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        201: {"description": "Task submitted successfully"},
+        404: {"model": ErrorResponse, "description": "Sandbox not found"},
+        409: {"model": ErrorResponse, "description": "Sandbox is paused"},
+        502: {"model": ErrorResponse, "description": "Failed to communicate with execd"},
+    },
+)
+async def submit_task(
+    sandbox_id: str,
+    request: Request,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+):
+    """
+    Submit a background task to a sandbox.
+
+    Runs a shell command in the background inside the sandbox container via execd.
+    Returns a task ID that can be used to poll status, stream logs, or kill the task.
+
+    Request body:
+    - `command` (required): Shell command to execute
+    - `cwd` (optional): Working directory (default: /workspace)
+    - `timeout` (optional): Max runtime in milliseconds
+    - `envs` (optional): Environment variables as key-value pairs
+    """
+    _touch_sandbox_activity(sandbox_id)
+    body = await request.json()
+    command = body.get("command")
+    if not command:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "TASK::INVALID_REQUEST", "message": "command is required"},
+        )
+    result = sandbox_service.submit_task(
+        sandbox_id=sandbox_id,
+        command=command,
+        cwd=body.get("cwd", "/workspace"),
+        timeout_ms=body.get("timeout"),
+        envs=body.get("envs"),
+    )
+    return result
+
+
+@router.get(
+    "/sandboxes/{sandbox_id}/tasks/{task_id}",
+    responses={
+        200: {"description": "Task status"},
+        404: {"model": ErrorResponse, "description": "Sandbox or task not found"},
+        409: {"model": ErrorResponse, "description": "Sandbox is paused"},
+    },
+)
+async def get_task_status(
+    sandbox_id: str,
+    task_id: str,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+):
+    """
+    Get task execution status.
+
+    Returns whether the task is still running, its exit code, and timestamps.
+    """
+    _touch_sandbox_activity(sandbox_id)
+    return sandbox_service.get_task_status(sandbox_id, task_id)
+
+
+@router.get(
+    "/sandboxes/{sandbox_id}/tasks/{task_id}/logs",
+    responses={
+        200: {"description": "Task logs (plain text)"},
+        404: {"model": ErrorResponse, "description": "Sandbox or task not found"},
+        409: {"model": ErrorResponse, "description": "Sandbox is paused"},
+    },
+)
+async def get_task_logs(
+    sandbox_id: str,
+    task_id: str,
+    cursor: Optional[int] = Query(None, ge=0, description="Line cursor for incremental reads"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+) -> Response:
+    """
+    Get task stdout/stderr logs.
+
+    Supports cursor-based incremental reads for polling long-running tasks.
+    Pass the cursor from the `X-Task-Log-Cursor` response header to get only new lines.
+    """
+    _touch_sandbox_activity(sandbox_id)
+    result = sandbox_service.get_task_logs(sandbox_id, task_id, cursor=cursor)
+    headers = {}
+    if result.get("cursor"):
+        headers["X-Task-Log-Cursor"] = str(result["cursor"])
+    return Response(
+        content=result["body"] if isinstance(result["body"], str) else str(result["body"]),
+        media_type="text/plain; charset=utf-8",
+        headers=headers,
+    )
+
+
+@router.delete(
+    "/sandboxes/{sandbox_id}/tasks/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {"description": "Task killed successfully"},
+        404: {"model": ErrorResponse, "description": "Sandbox or task not found"},
+        409: {"model": ErrorResponse, "description": "Sandbox is paused"},
+    },
+)
+async def kill_task(
+    sandbox_id: str,
+    task_id: str,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+) -> Response:
+    """
+    Kill a running task.
+
+    Sends a termination signal to the running command inside the sandbox.
+    """
+    _touch_sandbox_activity(sandbox_id)
+    sandbox_service.kill_task(sandbox_id, task_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

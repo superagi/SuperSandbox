@@ -47,6 +47,7 @@ from src.services.k8s.egress_helper import (
 from src.services.k8s.volume_helper import apply_volumes_to_pod_spec
 from src.services.k8s.workload_provider import WorkloadProvider
 from src.services.runtime_resolver import SecureRuntimeResolver
+from src.services.constants import SANDBOX_LAST_ACTIVITY_AT_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -682,6 +683,68 @@ class BatchSandboxProvider(WorkloadProvider):
             grace_period_seconds=0,
         )
     
+    def update_resource_limits(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        resource_limits: Dict[str, str],
+    ) -> None:
+        """Update CPU/memory resource limits on a BatchSandbox workload.
+
+        Patches the CRD spec to update resource limits on the first container.
+        The BatchSandbox controller will handle applying changes to the pod.
+        """
+        batchsandbox = self.get_workload(sandbox_id, namespace)
+        if not batchsandbox:
+            raise Exception(f"BatchSandbox for sandbox {sandbox_id} not found")
+
+        # Build the resource patch for the first container
+        spec = batchsandbox.get("spec", {})
+        template = spec.get("template", {})
+        pod_spec = template.get("spec", {})
+        containers = pod_spec.get("containers", [])
+
+        if not containers:
+            raise Exception("No containers found in BatchSandbox spec")
+
+        # Get current resources or start fresh
+        current_resources = containers[0].get("resources", {})
+        current_limits = dict(current_resources.get("limits", {}))
+        current_requests = dict(current_resources.get("requests", {}))
+
+        # Update only provided fields
+        for key, value in resource_limits.items():
+            current_limits[key] = value
+            current_requests[key] = value
+
+        # Patch the CRD
+        patch_body = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": containers[0].get("name", "sandbox"),
+                                "resources": {
+                                    "limits": current_limits,
+                                    "requests": current_requests,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=batchsandbox["metadata"]["name"],
+            body=patch_body,
+        )
+
     def pause_workload(self, sandbox_id: str, namespace: str) -> None:
         """Pause is not supported for BatchSandbox provider."""
         raise NotImplementedError("Pause is not supported for BatchSandbox provider")
@@ -832,3 +895,19 @@ class BatchSandboxProvider(WorkloadProvider):
         if not pod_ip:
             return None
         return Endpoint(endpoint=f"{pod_ip}:{port}")
+
+    def touch_last_activity(self, sandbox_id: str, namespace: str, timestamp: datetime) -> None:
+        """Best-effort patch of last activity label on BatchSandbox metadata."""
+        batchsandbox = self.get_workload(sandbox_id, namespace)
+        if not batchsandbox:
+            return
+        labels = (batchsandbox.get("metadata", {}).get("labels") or {}).copy()
+        labels[SANDBOX_LAST_ACTIVITY_AT_LABEL] = str(int(timestamp.timestamp()))
+        self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=batchsandbox["metadata"]["name"],
+            body={"metadata": {"labels": labels}},
+        )
