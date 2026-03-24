@@ -21,7 +21,7 @@ This module defines the abstract interface for sandbox services.
 
 from abc import ABC, abstractmethod
 import socket
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from src.api.schema import (
@@ -33,6 +33,8 @@ from src.api.schema import (
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
     Sandbox,
+    UpdateSandboxResourceLimitsRequest,
+    UpdateSandboxResourceLimitsResponse,
 )
 from src.services.validators import ensure_valid_port
 
@@ -255,5 +257,65 @@ class SandboxService(ABC):
 
         Returns:
             A bidirectional stream object
+        """
+        pass
+
+    @abstractmethod
+    def submit_task(
+        self,
+        sandbox_id: str,
+        command: str,
+        cwd: str = "/workspace",
+        timeout_ms: Optional[int] = None,
+        envs: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Submit a background task to a sandbox."""
+        pass
+
+    @abstractmethod
+    def get_task_status(self, sandbox_id: str, task_id: str) -> Dict[str, Any]:
+        """Get task execution status."""
+        pass
+
+    @abstractmethod
+    def get_task_logs(
+        self, sandbox_id: str, task_id: str, cursor: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get task logs with cursor-based pagination."""
+        pass
+
+    @abstractmethod
+    def kill_task(self, sandbox_id: str, task_id: str) -> None:
+        """Kill a running task."""
+        pass
+
+    @abstractmethod
+    def update_resource_limits(
+        self,
+        sandbox_id: str,
+        request: UpdateSandboxResourceLimitsRequest,
+    ) -> UpdateSandboxResourceLimitsResponse:
+        """
+        Update resource limits on a running or paused sandbox.
+
+        Args:
+            sandbox_id: Unique sandbox identifier
+            request: Resource limits update request
+
+        Returns:
+            UpdateSandboxResourceLimitsResponse: Updated sandbox state and resource limits
+
+        Raises:
+            HTTPException: If sandbox not found, invalid state, or update fails
+        """
+        pass
+
+    @abstractmethod
+    def touch_last_activity(self, sandbox_id: str) -> None:
+        """
+        Update the sandbox last-activity marker timestamp.
+
+        Implementations should treat this as best-effort and avoid raising for
+        transient update failures.
         """
         pass

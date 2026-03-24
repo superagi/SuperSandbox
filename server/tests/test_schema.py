@@ -24,6 +24,8 @@ from src.api.schema import (
     OSSFS,
     PVC,
     ResourceLimits,
+    UpdateResourceLimitsRequest,
+    UpdateSandboxResourceLimitsRequest,
     Volume,
 )
 
@@ -501,3 +503,121 @@ class TestCreateSandboxRequestWithVolumes:
         )
 
         assert request.timeout == 172800
+
+    def test_frontend_env_variables_and_labels_are_normalized(self):
+        """Frontend key/value arrays should map to env and metadata."""
+        req = CreateSandboxRequest.model_validate(
+            {
+                "image": {"uri": "python:3.11"},
+                "timeout": 3600,
+                "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+                "entrypoint": ["python", "-c", "print('hello')"],
+                "envVariables": [
+                    {"key": "A", "value": "1"},
+                    {"key": "B", "value": "2"},
+                ],
+                "labels": [
+                    {"key": "team", "value": "sandbox"},
+                    {"key": "env", "value": "dev"},
+                ],
+            }
+        )
+        assert req.env == {"A": "1", "B": "2"}
+        assert req.metadata == {"team": "sandbox", "env": "dev"}
+
+    def test_block_all_network_maps_to_deny_policy(self):
+        """blockAllNetwork should build a deny-all network policy when missing."""
+        req = CreateSandboxRequest.model_validate(
+            {
+                "image": {"uri": "python:3.11"},
+                "timeout": 3600,
+                "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+                "entrypoint": ["python", "-c", "print('hello')"],
+                "blockAllNetwork": True,
+            }
+        )
+        assert req.network_policy is not None
+        assert req.network_policy.default_action == "deny"
+        assert req.network_policy.egress == []
+
+
+# ============================================================================
+# UpdateResourceLimitsRequest Tests
+# ============================================================================
+
+
+class TestUpdateResourceLimitsRequest:
+    """Tests for UpdateResourceLimitsRequest validation."""
+
+    def test_valid_cpu_only(self):
+        req = UpdateResourceLimitsRequest(cpu="500m")
+        assert req.cpu == "500m"
+        assert req.memory is None
+        assert req.storage is None
+
+    def test_valid_memory_only(self):
+        req = UpdateResourceLimitsRequest(memory="1Gi")
+        assert req.memory == "1Gi"
+
+    def test_valid_storage_only(self):
+        req = UpdateResourceLimitsRequest(storage="10Gi")
+        assert req.storage == "10Gi"
+
+    def test_valid_all_fields(self):
+        req = UpdateResourceLimitsRequest(cpu="2000m", memory="2Gi", storage="5Gi")
+        assert req.cpu == "2000m"
+        assert req.memory == "2Gi"
+        assert req.storage == "5Gi"
+
+    def test_valid_cpu_without_suffix(self):
+        req = UpdateResourceLimitsRequest(cpu="2")
+        assert req.cpu == "2"
+
+    def test_valid_memory_mi_suffix(self):
+        req = UpdateResourceLimitsRequest(memory="512Mi")
+        assert req.memory == "512Mi"
+
+    def test_invalid_cpu_format(self):
+        with pytest.raises(ValidationError) as exc_info:
+            UpdateResourceLimitsRequest(cpu="500x")
+        assert "cpu" in str(exc_info.value).lower()
+
+    def test_invalid_cpu_negative(self):
+        with pytest.raises(ValidationError):
+            UpdateResourceLimitsRequest(cpu="-100m")
+
+    def test_invalid_memory_format(self):
+        with pytest.raises(ValidationError) as exc_info:
+            UpdateResourceLimitsRequest(memory="1GB")
+        assert "memory" in str(exc_info.value).lower()
+
+    def test_invalid_storage_format(self):
+        with pytest.raises(ValidationError):
+            UpdateResourceLimitsRequest(storage="big")
+
+    def test_no_fields_raises(self):
+        """At least one field must be provided."""
+        with pytest.raises(ValidationError) as exc_info:
+            UpdateResourceLimitsRequest()
+        assert "at least one" in str(exc_info.value).lower()
+
+
+class TestUpdateSandboxResourceLimitsRequest:
+    """Tests for the outer request wrapper."""
+
+    def test_valid_camel_case(self):
+        req = UpdateSandboxResourceLimitsRequest.model_validate(
+            {"resourceLimits": {"cpu": "1000m", "memory": "1Gi"}}
+        )
+        assert req.resource_limits.cpu == "1000m"
+        assert req.resource_limits.memory == "1Gi"
+
+    def test_valid_snake_case(self):
+        req = UpdateSandboxResourceLimitsRequest(
+            resource_limits=UpdateResourceLimitsRequest(cpu="500m")
+        )
+        assert req.resource_limits.cpu == "500m"
+
+    def test_missing_resource_limits_raises(self):
+        with pytest.raises(ValidationError):
+            UpdateSandboxResourceLimitsRequest.model_validate({})

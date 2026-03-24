@@ -33,7 +33,7 @@ from src.config import AppConfig
 from src.services.helpers import format_ingress_endpoint
 from src.api.schema import Endpoint, ImageSpec, NetworkPolicy, Volume
 from src.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
-from src.services.constants import SANDBOX_ID_LABEL
+from src.services.constants import SANDBOX_ID_LABEL, SANDBOX_LAST_ACTIVITY_AT_LABEL
 from src.services.k8s.client import K8sClient
 from src.services.k8s.egress_helper import (
     apply_egress_to_spec,
@@ -440,6 +440,63 @@ class AgentSandboxProvider(WorkloadProvider):
         except Exception as e:
             logger.warning("Failed to delete PVC %s: %s", pvc_name, e)
 
+    def update_resource_limits(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        resource_limits: Dict[str, str],
+    ) -> None:
+        """Update CPU/memory resource limits on an AgentSandbox workload."""
+        sandbox = self.get_workload(sandbox_id, namespace)
+        if not sandbox:
+            raise Exception(f"Sandbox {sandbox_id} not found")
+
+        spec = sandbox.get("spec", {})
+        pod_template = spec.get("podTemplate", spec.get("template", {}))
+        pod_spec = pod_template.get("spec", {})
+        containers = pod_spec.get("containers", [])
+
+        if not containers:
+            raise Exception("No containers found in Sandbox spec")
+
+        current_resources = containers[0].get("resources", {})
+        current_limits = dict(current_resources.get("limits", {}))
+        current_requests = dict(current_resources.get("requests", {}))
+
+        for key, value in resource_limits.items():
+            current_limits[key] = value
+            current_requests[key] = value
+
+        # Determine the template key used by this CRD
+        template_key = "podTemplate" if "podTemplate" in spec else "template"
+
+        patch_body = {
+            "spec": {
+                template_key: {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": containers[0].get("name", "sandbox"),
+                                "resources": {
+                                    "limits": current_limits,
+                                    "requests": current_requests,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=sandbox["metadata"]["name"],
+            body=patch_body,
+        )
+
     def pause_workload(self, sandbox_id: str, namespace: str) -> None:
         """Pause a sandbox by scaling replicas to 0."""
         sandbox = self.get_workload(sandbox_id, namespace)
@@ -654,3 +711,19 @@ class AgentSandboxProvider(WorkloadProvider):
             return Endpoint(endpoint=f"{service_fqdn}:{port}")
 
         return None
+
+    def touch_last_activity(self, sandbox_id: str, namespace: str, timestamp: datetime) -> None:
+        """Best-effort patch of last activity label on agent Sandbox metadata."""
+        sandbox = self.get_workload(sandbox_id, namespace)
+        if not sandbox:
+            return
+        labels = (sandbox.get("metadata", {}).get("labels") or {}).copy()
+        labels[SANDBOX_LAST_ACTIVITY_AT_LABEL] = str(int(timestamp.timestamp()))
+        self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=sandbox["metadata"]["name"],
+            body={"metadata": {"labels": labels}},
+        )

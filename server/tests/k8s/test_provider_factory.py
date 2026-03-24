@@ -198,7 +198,19 @@ spec:
             
             def get_endpoint_info(self, *args, **kwargs):
                 pass
-        
+
+            def pause_workload(self, *args, **kwargs):
+                pass
+
+            def resume_workload(self, *args, **kwargs):
+                pass
+
+            def touch_last_activity(self, *args, **kwargs):
+                pass
+
+            def update_resource_limits(self, *args, **kwargs):
+                pass
+
         # Register custom provider
         register_provider("custom", CustomProvider)
         

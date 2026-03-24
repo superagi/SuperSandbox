@@ -19,10 +19,11 @@ This module defines data models based on the OpenAPI specification
 for request/response validation and serialization.
 """
 
+import re
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, RootModel, model_validator
+from pydantic import BaseModel, Field, RootModel, field_validator, model_validator
 
 
 # ============================================================================
@@ -304,6 +305,13 @@ class SandboxStatus(BaseModel):
         populate_by_name = True
 
 
+class KeyValuePair(BaseModel):
+    """Generic key/value pair used by some frontend payloads."""
+
+    key: str = Field(..., min_length=1)
+    value: str = Field(default="")
+
+
 # ============================================================================
 # Sandbox Models
 # ============================================================================
@@ -366,6 +374,46 @@ class CreateSandboxRequest(BaseModel):
     class Config:
         populate_by_name = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_frontend_payload(cls, data: object) -> object:
+        """
+        Accept frontend payload variants and normalize to API fields.
+
+        Supported mappings:
+        - envVariables: [{key, value}] -> env: {key: value}
+        - labels: [{key, value}] -> metadata: {key: value}
+        - blockAllNetwork: true -> networkPolicy.defaultAction=deny, egress=[]
+        """
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+
+        if normalized.get("env") is None and isinstance(normalized.get("envVariables"), list):
+            env_dict: Dict[str, str] = {}
+            for pair in normalized.get("envVariables", []):
+                if isinstance(pair, dict) and pair.get("key"):
+                    env_dict[str(pair["key"])] = str(pair.get("value", ""))
+            if env_dict:
+                normalized["env"] = env_dict
+
+        if normalized.get("metadata") is None and isinstance(normalized.get("labels"), list):
+            metadata_dict: Dict[str, str] = {}
+            for pair in normalized.get("labels", []):
+                if isinstance(pair, dict) and pair.get("key"):
+                    metadata_dict[str(pair["key"])] = str(pair.get("value", ""))
+            if metadata_dict:
+                normalized["metadata"] = metadata_dict
+
+        if normalized.get("networkPolicy") is None and normalized.get("blockAllNetwork") is True:
+            normalized["networkPolicy"] = {
+                "defaultAction": "deny",
+                "egress": [],
+            }
+
+        return normalized
+
 
 class CreateSandboxResponse(BaseModel):
     """
@@ -405,6 +453,11 @@ class Sandbox(BaseModel):
         description="Timestamp when sandbox will auto-terminate. Null when manual cleanup is enabled.",
     )
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
+    last_activity_at: Optional[datetime] = Field(
+        None,
+        alias="lastActivityAt",
+        description="Timestamp of last sandbox activity (terminal, proxy, task).",
+    )
 
     class Config:
         populate_by_name = True
@@ -505,6 +558,108 @@ class RenewSandboxExpirationResponse(BaseModel):
         ...,
         alias="expiresAt",
         description="The new absolute expiration time in UTC (RFC 3339 format)",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================================
+# Update Resource Limits
+# ============================================================================
+
+# Patterns for validating K8s resource quantities
+_CPU_PATTERN = re.compile(r"^\d+m?$")
+_K8S_RESOURCE_PATTERN = re.compile(
+    r"^\d+(\.\d+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$"
+)
+
+
+class UpdateResourceLimitsRequest(BaseModel):
+    """
+    Request to update resource limits on a running or paused sandbox.
+
+    All fields are optional — only provided fields will be updated.
+    """
+
+    cpu: Optional[str] = Field(
+        None,
+        description="CPU limit in millicores format (e.g. '500m', '1', '2000m')",
+    )
+    memory: Optional[str] = Field(
+        None,
+        description="Memory limit in K8s resource format (e.g. '512Mi', '1Gi', '2Gi')",
+    )
+    storage: Optional[str] = Field(
+        None,
+        description="Storage size in K8s resource format (e.g. '5Gi', '10Gi'). Must be >= current size.",
+    )
+
+    @field_validator("cpu")
+    @classmethod
+    def validate_cpu(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _CPU_PATTERN.match(v):
+            raise ValueError(
+                f"Invalid CPU format '{v}'. Must match pattern ^\\d+m?$ "
+                "(e.g. '500m', '1', '2000m')"
+            )
+        return v
+
+    @field_validator("memory")
+    @classmethod
+    def validate_memory(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _K8S_RESOURCE_PATTERN.match(v):
+            raise ValueError(
+                f"Invalid memory format '{v}'. Must be a valid K8s resource quantity "
+                "(e.g. '512Mi', '1Gi', '2Gi')"
+            )
+        return v
+
+    @field_validator("storage")
+    @classmethod
+    def validate_storage(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _K8S_RESOURCE_PATTERN.match(v):
+            raise ValueError(
+                f"Invalid storage format '{v}'. Must be a valid K8s resource quantity "
+                "(e.g. '5Gi', '10Gi')"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def validate_at_least_one_field(self) -> "UpdateResourceLimitsRequest":
+        if self.cpu is None and self.memory is None and self.storage is None:
+            raise ValueError(
+                "At least one resource limit field (cpu, memory, storage) must be provided"
+            )
+        return self
+
+
+class UpdateSandboxResourceLimitsRequest(BaseModel):
+    """
+    Request body for PATCH /sandboxes/{id} to update resource limits.
+    """
+
+    resource_limits: UpdateResourceLimitsRequest = Field(
+        ...,
+        alias="resourceLimits",
+        description="Resource limits to update. Only provided fields are changed.",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class UpdateSandboxResourceLimitsResponse(BaseModel):
+    """
+    Response from updating sandbox resource limits.
+    """
+
+    id: str = Field(..., description="Unique sandbox identifier")
+    status: SandboxStatus = Field(..., description="Current lifecycle status")
+    resource_limits: Dict[str, str] = Field(
+        ...,
+        alias="resourceLimits",
+        description="Current resource limits after update",
     )
 
     class Config:

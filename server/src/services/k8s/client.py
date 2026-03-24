@@ -340,6 +340,33 @@ class K8sClient:
                 return
             raise
 
+    def patch_pvc(
+        self,
+        namespace: str,
+        name: str,
+        body: Dict[str, Any],
+    ) -> Any:
+        """Patch a PersistentVolumeClaim (e.g. to expand storage)."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        return self.get_core_v1_api().patch_namespaced_persistent_volume_claim(
+            name=name,
+            namespace=namespace,
+            body=body,
+        )
+
+    def get_storage_class(self, name: str) -> Optional[Any]:
+        """Get a StorageClass by name. Returns None if not found."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            storage_api = client.StorageV1Api()
+            return storage_api.read_storage_class(name)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
     def get_pvc(self, namespace: str, name: str) -> Optional[Any]:
         """Get a PersistentVolumeClaim. Returns None if not found."""
         if self._read_limiter:
@@ -446,3 +473,168 @@ class K8sClient:
             if pod.status and pod.status.phase == "Running":
                 return pod.metadata.name
         return None
+
+    def get_pod_ip_for_sandbox(
+        self,
+        namespace: str,
+        sandbox_id: str,
+    ) -> Optional[str]:
+        """Find the running pod IP for a sandbox by label selector."""
+        pods = self.list_pods(
+            namespace=namespace,
+            label_selector=f"opensandbox.io/id={sandbox_id}",
+        )
+        for pod in pods:
+            if pod.status and pod.status.pod_ip and pod.status.phase == "Running":
+                return pod.status.pod_ip
+        return None
+
+    # ------------------------------------------------------------------
+    # Execd operations (via K8s exec into the pod → localhost:44772)
+    # ------------------------------------------------------------------
+
+    def _exec_in_pod(
+        self,
+        namespace: str,
+        pod_name: str,
+        command: List[str],
+        container: str = "sandbox",
+    ) -> str:
+        """Execute a command inside a pod via K8s API and return stdout."""
+        resp = k8s_stream(
+            self.get_core_v1_api().connect_get_namespaced_pod_exec,
+            name=pod_name,
+            namespace=namespace,
+            container=container,
+            command=command,
+            stdin=False,
+            stdout=True,
+            stderr=True,
+            tty=False,
+        )
+        return resp
+
+    def call_execd(
+        self,
+        namespace: str,
+        pod_name: str,
+        method: str,
+        path: str,
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Call execd inside a sandbox pod via K8s exec → localhost:44772.
+
+        Uses python3 urllib inside the pod to make HTTP requests to execd.
+        Goes through K8s API server, so works from anywhere.
+        """
+        import json as json_mod
+
+        # Build query string
+        query = ""
+        if params:
+            from urllib.parse import urlencode
+            query = "?" + urlencode(params)
+
+        url = f"http://localhost:44772{path}{query}"
+
+        # Build python script to execute inside the pod
+        if method == "GET":
+            script = f"""
+import urllib.request, json, sys
+try:
+    resp = urllib.request.urlopen("{url}")
+    headers = dict(resp.headers)
+    body = resp.read().decode()
+    ct = headers.get("Content-Type", "")
+    if "json" in ct:
+        body = json.loads(body)
+    print(json.dumps({{"status_code": resp.status, "body": body, "headers": headers}}))
+except urllib.error.HTTPError as e:
+    print(json.dumps({{"status_code": e.code, "body": e.read().decode(), "headers": {{}}}}))
+"""
+        elif method == "DELETE":
+            script = f"""
+import urllib.request, json, sys
+try:
+    req = urllib.request.Request("{url}", method="DELETE")
+    resp = urllib.request.urlopen(req)
+    print(json.dumps({{"status_code": resp.status, "body": resp.read().decode(), "headers": {{}}}}))
+except urllib.error.HTTPError as e:
+    print(json.dumps({{"status_code": e.code, "body": e.read().decode(), "headers": {{}}}}))
+"""
+        else:  # POST
+            body_json = json_mod.dumps(json_body) if json_body else "{}"
+            script = f"""
+import urllib.request, json, sys
+data = {repr(body_json)}.encode()
+req = urllib.request.Request("{url}", data=data, headers={{"Content-Type": "application/json"}})
+try:
+    resp = urllib.request.urlopen(req)
+    headers = dict(resp.headers)
+    body = resp.read().decode()
+    ct = headers.get("Content-Type", "")
+    if "json" in ct:
+        body = json.loads(body)
+    print(json.dumps({{"status_code": resp.status, "body": body, "headers": headers}}))
+except urllib.error.HTTPError as e:
+    print(json.dumps({{"status_code": e.code, "body": e.read().decode(), "headers": {{}}}}))
+"""
+
+        try:
+            output = self._exec_in_pod(
+                namespace=namespace,
+                pod_name=pod_name,
+                command=["python3", "-c", script],
+            )
+            return json_mod.loads(output.strip())
+        except json_mod.JSONDecodeError:
+            raise Exception(f"Unexpected execd response: {output[:200]}")
+        except Exception as e:
+            raise Exception(f"Failed to call execd: {e}") from e
+
+    def call_execd_submit(
+        self,
+        namespace: str,
+        pod_name: str,
+        json_body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Submit a background command to execd and return the task ID.
+
+        POSTs to /command, reads the first line of the response to extract
+        the task ID from the init event.
+        """
+        import json as json_mod
+
+        body_json = json_mod.dumps(json_body)
+
+        script = f"""
+import urllib.request, json, sys
+data = {repr(body_json)}.encode()
+req = urllib.request.Request("http://localhost:44772/command", data=data, headers={{"Content-Type": "application/json"}})
+try:
+    resp = urllib.request.urlopen(req)
+    first_line = resp.readline().decode().strip()
+    if first_line:
+        event = json.loads(first_line)
+        if event.get("type") == "init":
+            print(json.dumps({{"status_code": 200, "task_id": event.get("text")}}))
+        else:
+            print(json.dumps({{"status_code": 200, "task_id": None}}))
+    else:
+        print(json.dumps({{"status_code": 200, "task_id": None}}))
+except urllib.error.HTTPError as e:
+    print(json.dumps({{"status_code": e.code, "body": e.read().decode()}}))
+"""
+
+        try:
+            output = self._exec_in_pod(
+                namespace=namespace,
+                pod_name=pod_name,
+                command=["python3", "-c", script],
+            )
+            return json_mod.loads(output.strip())
+        except json_mod.JSONDecodeError:
+            raise Exception(f"Unexpected execd response: {output[:200]}")
+        except Exception as e:
+            raise Exception(f"Failed to submit task: {e}") from e

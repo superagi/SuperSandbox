@@ -116,10 +116,25 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI application
 app = FastAPI(
-    title="OpenSandbox Lifecycle API",
-    version="0.1.0",
-    description="The Sandbox Lifecycle API coordinates how untrusted workloads are created, "
-                "executed, paused, resumed, and finally disposed.",
+    title="SuperSandbox API",
+    version="0.2.0",
+    description=(
+        "SuperSandbox manages isolated Linux sandbox environments on Kubernetes with gVisor.\n\n"
+        "## Sandbox Lifecycle\n"
+        "- **Create** — `POST /sandboxes` — Provisions a sandbox with a persistent /workspace volume\n"
+        "- **Get** — `GET /sandboxes/{id}` — Returns sandbox status (Pending, Running, Paused, Terminated)\n"
+        "- **List** — `GET /sandboxes` — List sandboxes with filtering and pagination\n"
+        "- **Pause** — `POST /sandboxes/{id}/pause` — Scales pod to zero; /workspace data persists\n"
+        "- **Resume** — `POST /sandboxes/{id}/resume` — Recreates pod; /workspace data restored\n"
+        "- **Delete** — `DELETE /sandboxes/{id}` — Removes sandbox, pod, and workspace volume\n\n"
+        "## Logs & Terminal\n"
+        "- **Logs** — `GET /sandboxes/{id}/logs?tail=100&follow=false` — Pod stdout/stderr\n"
+        "- **Terminal** — `WebSocket /sandboxes/{id}/terminal` — Interactive bash shell (PTY). "
+        "Connect with any WebSocket client or xterm.js. Send text (keystrokes), receive text (terminal output).\n\n"
+        "## Proxy\n"
+        "- **Endpoint** — `GET /sandboxes/{id}/endpoints/{port}` — Get pod IP and port\n"
+        "- **Proxy** — `ANY /sandboxes/{id}/proxy/{port}/{path}` — HTTP proxy to sandbox services\n"
+    ),
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,

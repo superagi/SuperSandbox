@@ -198,6 +198,26 @@ class WorkloadProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def update_resource_limits(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        resource_limits: Dict[str, str],
+    ) -> None:
+        """
+        Update CPU and memory resource limits on a workload.
+
+        The provider should attempt in-place resize if supported,
+        otherwise perform a rolling restart by patching the pod spec.
+
+        Args:
+            sandbox_id: Unique sandbox identifier
+            namespace: Kubernetes namespace
+            resource_limits: Dict with 'cpu' and/or 'memory' values
+        """
+        pass
+
     def supports_image_auth(self) -> bool:
         """
         Whether this provider supports per-request image pull authentication.
@@ -206,6 +226,13 @@ class WorkloadProvider(ABC):
         this method to return True.
         """
         return False
+
+    @abstractmethod
+    def touch_last_activity(self, sandbox_id: str, namespace: str, timestamp: datetime) -> None:
+        """
+        Update workload metadata to reflect latest sandbox activity timestamp.
+        """
+        pass
 
     def legacy_resource_name(self, sandbox_id: str) -> str:
         """
