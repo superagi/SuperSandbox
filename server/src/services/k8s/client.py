@@ -587,9 +587,12 @@ except urllib.error.HTTPError as e:
                 pod_name=pod_name,
                 command=["python3", "-c", script],
             )
-            return json_mod.loads(output.strip())
-        except json_mod.JSONDecodeError:
-            raise Exception(f"Unexpected execd response: {output[:200]}")
+            try:
+                return json_mod.loads(output.strip())
+            except json_mod.JSONDecodeError:
+                # Fallback: output may be Python repr (single quotes) instead of JSON
+                import ast
+                return ast.literal_eval(output.strip())
         except Exception as e:
             raise Exception(f"Failed to call execd: {e}") from e
 
@@ -633,8 +636,15 @@ except urllib.error.HTTPError as e:
                 pod_name=pod_name,
                 command=["python3", "-c", script],
             )
-            return json_mod.loads(output.strip())
-        except json_mod.JSONDecodeError:
-            raise Exception(f"Unexpected execd response: {output[:200]}")
+            import logging
+            logging.getLogger(__name__).debug("call_execd_submit raw output: %r", output)
+            try:
+                return json_mod.loads(output.strip())
+            except json_mod.JSONDecodeError:
+                # Fallback: output may be Python repr (single quotes) instead of JSON
+                import ast
+                return ast.literal_eval(output.strip())
         except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("call_execd_submit failed, raw output: %r", output if 'output' in dir() else '<not set>')
             raise Exception(f"Failed to submit task: {e}") from e

@@ -470,19 +470,19 @@ class AgentSandboxProvider(WorkloadProvider):
         # Determine the template key used by this CRD
         template_key = "podTemplate" if "podTemplate" in spec else "template"
 
+        # Preserve all existing container fields (image, command, env, volumeMounts, etc.)
+        # to avoid wiping them when patching the containers array
+        patched_container = dict(containers[0])
+        patched_container["resources"] = {
+            "limits": current_limits,
+            "requests": current_requests,
+        }
+
         patch_body = {
             "spec": {
                 template_key: {
                     "spec": {
-                        "containers": [
-                            {
-                                "name": containers[0].get("name", "sandbox"),
-                                "resources": {
-                                    "limits": current_limits,
-                                    "requests": current_requests,
-                                },
-                            }
-                        ]
+                        "containers": [patched_container]
                     }
                 }
             }
