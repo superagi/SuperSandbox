@@ -41,6 +41,7 @@ servers:
     description: Local development
 security:
   - apiKeyAuth: []
+  - {}
 tags:
   - name: Sandboxes
     description: Provision and transition sandboxes through their lifecycle
@@ -391,7 +392,8 @@ components:
       in: header
       name: OPEN-SANDBOX-API-KEY
       description: |
-        API Key for authentication. Can be provided via:
+        API Key for authentication (optional — only required when the server has an API key configured).
+        Can be provided via:
         1. HTTP Header: OPEN-SANDBOX-API-KEY: your-api-key
         2. Environment variable: OPEN_SANDBOX_API_KEY (for SDK clients)
   parameters:
