@@ -1,0 +1,213 @@
+name: Publish to ECR
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to build'
+        required: true
+        type: choice
+        options:
+          - execd
+          - ingress
+          - controller
+          - server
+          - helm-chart
+          - all
+        default: 'all'
+      image_tag:
+        description: 'Image / chart tag (e.g. v0.1.0)'
+        required: true
+        default: 'latest'
+  push:
+    tags:
+      - 'docker/execd/**'
+      - 'docker/ingress/**'
+      - 'k8s/controller/**'
+      - 'docker/server/**'
+      - 'helm/**'
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  ROLE_ARN: ${{ vars.SUPERSANDBOX_ECR_PUSH_ROLE_ARN }}
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Build & push component images
+  # ──────────────────────────────────────────────
+  publish-images:
+    runs-on: ubuntu-latest
+    if: |
+      !startsWith(github.ref, 'refs/tags/helm/')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Parse tag and set variables
+        id: vars
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_PATH="${GITHUB_REF#refs/tags/}"
+            COMPONENT=$(echo "$TAG_PATH" | cut -d'/' -f2)
+            IMAGE_TAG=$(echo "$TAG_PATH" | cut -d'/' -f3)
+          else
+            COMPONENT="${{ inputs.component }}"
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          fi
+
+          echo "component=$COMPONENT" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h
+
+      - name: Build and push execd
+        if: steps.vars.outputs.component == 'execd' || steps.vars.outputs.component == 'all'
+        env:
+          TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          REPO="${{ env.ECR_REGISTRY }}/supersandbox/execd"
+          TAGS="-t ${REPO}:${TAG}"
+          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            $TAGS \
+            -f components/execd/Dockerfile \
+            --push .
+
+      - name: Build and push ingress
+        if: steps.vars.outputs.component == 'ingress' || steps.vars.outputs.component == 'all'
+        env:
+          TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          REPO="${{ env.ECR_REGISTRY }}/supersandbox/ingress"
+          TAGS="-t ${REPO}:${TAG}"
+          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            $TAGS \
+            -f components/ingress/Dockerfile \
+            --push .
+
+      - name: Build and push server
+        if: steps.vars.outputs.component == 'server' || steps.vars.outputs.component == 'all'
+        env:
+          TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          REPO="${{ env.ECR_REGISTRY }}/supersandbox/server"
+          TAGS="-t ${REPO}:${TAG}"
+          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            $TAGS \
+            -f server/Dockerfile \
+            --push .
+
+      - name: Build and push controller
+        if: steps.vars.outputs.component == 'controller' || steps.vars.outputs.component == 'all'
+        env:
+          TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          REPO="${{ env.ECR_REGISTRY }}/supersandbox/controller"
+          TAGS="-t ${REPO}:${TAG}"
+          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg PACKAGE=cmd/controller/main.go \
+            $TAGS \
+            -f kubernetes/Dockerfile \
+            --push kubernetes/
+
+
+  # ──────────────────────────────────────────────
+  # Package & push Helm chart to ECR OCI
+  # ──────────────────────────────────────────────
+  publish-helm:
+    runs-on: ubuntu-latest
+    if: |
+      startsWith(github.ref, 'refs/tags/helm/') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.component == 'helm-chart' || inputs.component == 'all') && inputs.image_tag != 'latest')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Parse chart version from tag
+        id: vars
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/helm/* ]]; then
+            TAG_PATH="${GITHUB_REF#refs/tags/}"
+            CHART=$(echo "$TAG_PATH" | cut -d'/' -f2)
+            VERSION=$(echo "$TAG_PATH" | cut -d'/' -f3)
+            VERSION="${VERSION#v}"
+          else
+            CHART="opensandbox"
+            VERSION="${{ inputs.image_tag }}"
+            VERSION="${VERSION#v}"
+          fi
+          echo "chart=$CHART" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build Helm dependencies
+        run: |
+          helm dependency update kubernetes/charts/${{ steps.vars.outputs.chart }}
+
+      - name: Package Helm chart
+        run: |
+          helm package kubernetes/charts/${{ steps.vars.outputs.chart }} \
+            --version ${{ steps.vars.outputs.version }} \
+            --app-version ${{ steps.vars.outputs.version }}
+
+      - name: Login to ECR (Helm OCI)
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            helm registry login \
+              --username AWS \
+              --password-stdin \
+              ${{ env.ECR_REGISTRY }}
+
+      - name: Push Helm chart to ECR
+        run: |
+          helm push \
+            ${{ steps.vars.outputs.chart }}-${{ steps.vars.outputs.version }}.tgz \
+            oci://${{ env.ECR_REGISTRY }}/supersandbox/helm-charts
