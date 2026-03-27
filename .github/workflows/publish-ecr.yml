@@ -126,7 +126,7 @@ jobs:
             --platform linux/amd64 \
             $TAGS \
             -f server/Dockerfile \
-            --push .
+            --push server/
 
       - name: Build and push controller
         if: steps.vars.outputs.component == 'controller' || steps.vars.outputs.component == 'all'
