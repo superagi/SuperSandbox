@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_ENV_VAR = "SANDBOX_CONFIG_PATH"
 DEFAULT_CONFIG_PATH = Path.home() / ".sandbox.toml"
+BUNDLED_CONFIG_PATH = Path(__file__).resolve().parent.parent / "default.config.toml"
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
@@ -532,13 +533,19 @@ _config_path: Path | None = None
 
 
 def _resolve_config_path(path: str | Path | None = None) -> Path:
-    """Resolve configuration file path from explicit value, env var, or default."""
+    """Resolve configuration file path from explicit value, env var, or default.
+
+    Falls back to the bundled default.config.toml shipped with the project
+    when neither an explicit path, env var, nor ~/.sandbox.toml is present.
+    """
     if path:
         return Path(path).expanduser()
     env_path = os.environ.get(CONFIG_ENV_VAR)
     if env_path:
         return Path(env_path).expanduser()
-    return DEFAULT_CONFIG_PATH
+    if DEFAULT_CONFIG_PATH.exists():
+        return DEFAULT_CONFIG_PATH
+    return BUNDLED_CONFIG_PATH
 
 
 def _load_toml_data(path: Path) -> dict[str, Any]:
@@ -623,6 +630,7 @@ __all__ = [
     "EgressConfig",
     "SecureRuntimeConfig",
     "DEFAULT_CONFIG_PATH",
+    "BUNDLED_CONFIG_PATH",
     "CONFIG_ENV_VAR",
     "get_config",
     "get_config_path",
