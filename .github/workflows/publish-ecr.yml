@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       startsWith(github.ref, 'refs/tags/helm/') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.component == 'helm-chart' || inputs.component == 'all') && inputs.image_tag != 'latest')
+      (github.event_name == 'workflow_dispatch' && (inputs.component == 'helm-chart' || inputs.component == 'all'))
 
     steps:
       - name: Checkout code
@@ -188,6 +188,14 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm dependency update kubernetes/charts/${{ steps.vars.outputs.chart }}
+
+      - name: Validate version is semver
+        run: |
+          VERSION="${{ steps.vars.outputs.version }}"
+          if [[ "$VERSION" == "latest" || -z "$VERSION" ]]; then
+            echo "Error: image_tag must be a semver version (e.g. 0.1.0), not 'latest'"
+            exit 1
+          fi
 
       - name: Package Helm chart
         run: |
