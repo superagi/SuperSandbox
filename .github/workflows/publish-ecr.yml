@@ -22,7 +22,6 @@ on:
       image_tag:
         description: 'Image / chart tag (e.g. v0.1.0)'
         required: true
-        default: 'latest'
   push:
     tags:
       - 'docker/execd/**'
@@ -152,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       startsWith(github.ref, 'refs/tags/helm/') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.component == 'helm-chart' || inputs.component == 'all'))
+      (github.event_name == 'workflow_dispatch' && (inputs.component == 'helm-chart' || inputs.component == 'all') && inputs.image_tag != 'latest')
 
     steps:
       - name: Checkout code
