@@ -33,8 +33,8 @@ PROVIDER_TYPE_AGENT_SANDBOX = "agent-sandbox"
 
 # Registry of available workload providers
 _PROVIDER_REGISTRY: Dict[str, Type[WorkloadProvider]] = {
-    PROVIDER_TYPE_BATCHSANDBOX: BatchSandboxProvider,
     PROVIDER_TYPE_AGENT_SANDBOX: AgentSandboxProvider,
+    PROVIDER_TYPE_BATCHSANDBOX: BatchSandboxProvider,
     # Future providers can be registered here:
     # "pod": PodProvider
 }
