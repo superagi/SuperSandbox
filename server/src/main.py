@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
-from src.config import load_config
+from src.config import get_config_path, load_config
 from uvicorn.config import LOGGING_CONFIG as UVICORN_LOGGING_CONFIG
 
 # Load configuration before initializing routers/middleware
@@ -231,6 +231,31 @@ async def health_check():
         dict: Health status
     """
     return {"status": "healthy"}
+
+
+_SENSITIVE_KEYS = {"api_key", "kubeconfig_path", "password"}
+
+
+def _redact(obj):
+    """Recursively redact sensitive fields from a config dict."""
+    if isinstance(obj, dict):
+        return {
+            k: ("******" if k in _SENSITIVE_KEYS and v else _redact(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redact(item) for item in obj]
+    return obj
+
+
+@app.get("/config", tags=["System"])
+async def get_server_config():
+    """
+    Return the active server configuration with sensitive fields redacted.
+    """
+    config_data = _redact(app_config.model_dump())
+    config_data["config_path"] = str(get_config_path())
+    return config_data
 
 
 if __name__ == "__main__":
