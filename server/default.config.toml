@@ -1,0 +1,31 @@
+# Default OpenSandbox Server Configuration
+#
+# This file ships with the project and is used as the fallback when no
+# user-level config (~/.sandbox.toml) or SANDBOX_CONFIG_PATH env var is set.
+
+[runtime]
+type = "kubernetes"
+execd_image = "opensandbox/execd:v1.0.6"
+
+[egress]
+image = "opensandbox/egress:v1.0.3"
+
+[storage]
+allowed_host_paths = []
+
+[kubernetes]
+kubeconfig_path = "~/.kube/config"
+namespace = "opensandbox"
+informer_enabled = true
+informer_resync_seconds = 300
+informer_watch_timeout_seconds = 60
+pod_ready_timeout_seconds = 300
+pod_ready_poll_interval_seconds = 2
+workload_provider = "agent-sandbox"
+
+[secure_runtime]
+type = "gvisor"
+k8s_runtime_class = "gvisor"
+
+[ingress]
+mode = "direct"
