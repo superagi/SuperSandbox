@@ -202,7 +202,7 @@ jobs:
             --version ${{ steps.vars.outputs.version }} \
             --app-version ${{ steps.vars.outputs.version }}
 
-      - name: Login to ECR (Helm OCI)
+      - name: Push Helm chart to ECR
         run: |
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
             helm registry login \
@@ -210,8 +210,6 @@ jobs:
               --password-stdin \
               ${{ env.ECR_REGISTRY }}
 
-      - name: Push Helm chart to ECR
-        run: |
           helm push \
             ${{ steps.vars.outputs.chart }}-${{ steps.vars.outputs.version }}.tgz \
-            oci://${{ env.ECR_REGISTRY }}/supersandbox/helm-charts
+            oci://${{ env.ECR_REGISTRY }}/supersandbox/helm-charts/opensandbox
