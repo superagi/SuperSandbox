@@ -212,4 +212,4 @@ jobs:
 
           helm push \
             ${{ steps.vars.outputs.chart }}-${{ steps.vars.outputs.version }}.tgz \
-            oci://${{ env.ECR_REGISTRY }}/supersandbox/helm-charts/opensandbox
+            oci://${{ env.ECR_REGISTRY }}/supersandbox/helm-charts
