@@ -31,6 +31,11 @@ server:
   tolerations: []
   affinity: {}
 
+  # -- Extra volume mounts to add to the server container
+  extraVolumeMounts: []
+  # -- Extra volumes to add to the pod
+  extraVolumes: []
+
   # Gateway (components/ingress): when enabled, writes config [ingress] and deploys the gateway
   gateway:
     enabled: false
