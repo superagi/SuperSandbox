@@ -158,8 +158,7 @@ app.add_middleware(
 # 401 from AuthMiddleware) gets X-Request-ID and logs have request_id in context.
 app.add_middleware(RequestIdMiddleware)
 
-# Include API routes at root and versioned prefix
-app.include_router(router)
+# Include API routes at versioned prefix only
 app.include_router(router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"
