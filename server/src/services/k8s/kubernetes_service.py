@@ -1035,13 +1035,23 @@ class KubernetesSandboxService(SandboxService):
             str when follow=False, streaming response when follow=True
         """
         pod_name = self.get_sandbox_pod_name(sandbox_id)
-        return self.k8s_client.read_pod_log(
-            namespace=self.namespace,
-            pod_name=pod_name,
-            container="sandbox",
-            tail_lines=tail_lines,
-            follow=follow,
-        )
+        try:
+            return self.k8s_client.read_pod_log(
+                namespace=self.namespace,
+                pod_name=pod_name,
+                container="sandbox",
+                tail_lines=tail_lines,
+                follow=follow,
+            )
+        except Exception as e:
+            logger.error(f"Failed to read logs for sandbox {sandbox_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_API_ERROR,
+                    "message": f"Failed to read pod logs: {str(e)}",
+                },
+            ) from e
 
     def exec_sandbox_terminal(self, sandbox_id: str, command: str = "/bin/bash") -> Any:
         """
