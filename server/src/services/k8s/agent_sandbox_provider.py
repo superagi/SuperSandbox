@@ -277,6 +277,9 @@ class AgentSandboxProvider(WorkloadProvider):
                     "emptyDir": {},
                 }
             ],
+            "nodeSelector": {
+                "kubernetes.io/arch": "amd64",
+            },
         }
 
         # Inject runtimeClassName if secure runtime is configured
