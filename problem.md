@@ -1,6 +1,6 @@
 # Staging Environment Issues — Sandbox Endpoint & Logs
 
-**Date:** 2026-03-31
+**Date:** 2026-04-01 (updated)
 **Sandbox ID:** `4e535c1e-cebd-4635-9ba6-7af38eef1cff`
 **Environment:** Staging (`sandbox.superagii.com`)
 
@@ -14,33 +14,50 @@
 
 ---
 
-## Issue 1: Ingress Endpoint Returns 404
+## Issue 1 (CRITICAL): Ingress Proxy Not Deployed / Not Wired Up
 
 **Symptom:**
 ```bash
+# With the OpenSandbox-Ingress-To header
 curl -k "https://sandbox.dev.superagi.com/" \
   -H "OpenSandbox-Ingress-To: 4e535c1e-cebd-4635-9ba6-7af38eef1cff-8080"
-# => 404 Not Found
+# => 404 Not Found (9 bytes, plain text)
+
+# Without the header — same response
+curl -k "https://sandbox.dev.superagi.com/"
+# => 404 Not Found (9 bytes, plain text)
 ```
 
-**Endpoint API response:**
-```json
-{
-  "endpoint": "sandbox.dev.superagi.com",
-  "headers": {
-    "OpenSandbox-Ingress-To": "4e535c1e-cebd-4635-9ba6-7af38eef1cff-8080"
-  }
-}
-```
+Both responses come from `server: APISIX/3.14.1` with no custom headers.
 
-**Root Cause (probable):**
-APISIX gateway does not have a route configured to match the `OpenSandbox-Ingress-To` header and forward traffic to the sandbox pod. The endpoint API returns the ingress URL assuming the route exists, but APISIX has no matching rule.
+**Root Cause (confirmed):**
+The Go-based **OpenSandbox Ingress Proxy** (`components/ingress/`) is **not deployed or not reachable** in staging. The evidence:
 
-**Possible fixes:**
-1. Verify APISIX route rules exist for header-based sandbox routing (`OpenSandbox-Ingress-To` header matching)
-2. Check if the ingress controller/operator is supposed to auto-create APISIX routes when sandboxes are created — it may not be running or may lack permissions
-3. Verify the APISIX config at `components/ingress/` matches the staging deployment
-4. Check APISIX admin API for existing routes: `curl http://<apisix-admin>:9180/apisix/admin/routes`
+1. If the ingress proxy was running, requests **without** the header would return:
+   `"OpenSandbox Ingress: missing header 'Opensandbox-Ingress-To' or 'Host'"` (from `components/ingress/pkg/proxy/host.go:44`)
+
+2. If the ingress proxy was running and the sandbox wasn't found, it would return:
+   `"OpenSandbox Ingress: sandbox not found: <namespace>/..."` (from `components/ingress/pkg/proxy/proxy.go:66`)
+
+3. Instead, we get APISIX's default 404 — meaning APISIX has **no upstream/route** configured for `sandbox.dev.superagi.com` to forward traffic to the ingress proxy.
+
+**How the ingress proxy works (when deployed):**
+- It's a standalone Go HTTP server (`components/ingress/main.go`)
+- Uses a K8s dynamic informer to watch Sandbox CRs (`agents.x-k8s.io/v1alpha1/sandboxes`)
+- In `header` mode: reads `OpenSandbox-Ingress-To` header → parses `<sandbox-id>-<port>` → looks up Sandbox CR → gets `status.serviceFQDN` → reverse proxies to `<serviceFQDN>:<port>`
+- Resolves sandbox by resource name candidates: `sandbox-<id>`, raw `<id>`, `sandbox-<id>` (legacy)
+
+**Fix — 3 steps required:**
+1. **Deploy the ingress proxy** in the staging K8s cluster (build from `components/ingress/`)
+2. **Start it with correct flags:**
+   ```bash
+   opensandbox-ingress \
+     -namespace <sandbox-namespace> \
+     -provider-type agent-sandbox \
+     -mode header \
+     -port 8080
+   ```
+3. **Configure APISIX** to route `sandbox.dev.superagi.com` traffic to the ingress proxy K8s service
 
 ---
 
@@ -52,15 +69,26 @@ curl -D - "https://sandbox.superagii.com/sandboxes/{id}/proxy/8080/" \
   -H "OPEN-SANDBOX-API-KEY: ..."
 # => 301 Moved Permanently
 # Location: https://sandbox.dev.superagi.com:443/
+# server: APISIX/3.14.1
 ```
 
-**Root Cause (probable):**
-APISIX is matching the `/sandboxes/{id}/proxy/8080/` path with a catch-all redirect rule before it reaches the FastAPI server. The proxy route never hits the Python backend — APISIX intercepts it first.
+**Additional finding:**
+Requests to `sandbox.superagii.com` **do** reach the FastAPI server for other paths. For example:
+```bash
+curl -k "https://sandbox.superagii.com/" \
+  -H "OpenSandbox-Ingress-To: ..." \
+  -H "OPEN-SANDBOX-API-KEY: ..."
+# => {"detail":"Not Found"}  (JSON — this IS from FastAPI)
+```
 
-**Possible fixes:**
-1. Check APISIX route priority — ensure the API server routes (e.g., `/sandboxes/*`) have higher priority than the ingress redirect rules
-2. Verify the APISIX upstream for the sandbox API server is correctly configured and the route matches `/sandboxes/*/proxy/*` paths
-3. The redirect to `sandbox.dev.superagi.com` suggests a misconfigured route that's treating proxy paths as ingress traffic instead of API traffic
+This confirms the API server is reachable, but the `/sandboxes/{id}/proxy/{port}/` path specifically is being intercepted by APISIX before it reaches FastAPI.
+
+**Root Cause:**
+APISIX has a route rule that matches `/sandboxes/*/proxy/*` and redirects it to `sandbox.dev.superagi.com` (likely intended to redirect to the ingress proxy). But since the ingress proxy isn't deployed (Issue 1), the redirect leads to another 404.
+
+**Fix:**
+- Option A: Remove the APISIX redirect rule for proxy paths so they pass through to the FastAPI server's built-in proxy handler (`server/src/api/lifecycle.py:444-526`)
+- Option B: Once the ingress proxy is deployed (Issue 1 fix), the redirect will work — but this is an unnecessary hop since the FastAPI server can proxy directly
 
 ---
 
@@ -70,36 +98,44 @@ APISIX is matching the `/sandboxes/{id}/proxy/8080/` path with a catch-all redir
 ```bash
 curl "https://sandbox.superagii.com/sandboxes/{id}/logs" \
   -H "OPEN-SANDBOX-API-KEY: ..."
-# => 500 Internal Server Error
+# => 500 Internal Server Error (21 bytes, plain text)
+# x-apisix-upstream-status: 500  (confirms the 500 is from the FastAPI backend)
 ```
 
 **Code path:**
-1. `get_sandbox_logs()` — `server/src/api/lifecycle.py:557`
-2. `get_sandbox_pod_name()` — `server/src/services/k8s/kubernetes_service.py:981`
-3. `read_pod_log(pod_name, container="sandbox")` — `server/src/services/k8s/client.py:388`
-4. K8s API: `read_namespaced_pod_log()` — `client.py:420`
+```
+get_sandbox_logs()                          → lifecycle.py:557
+  └─ sandbox_service.get_sandbox_logs()     → kubernetes_service.py:1025
+       ├─ get_sandbox_pod_name(sandbox_id)  → kubernetes_service.py:981
+       │    └─ k8s_client.get_pod_name_for_sandbox()  → client.py:459
+       └─ k8s_client.read_pod_log()         → client.py:388
+            └─ core_v1_api.read_namespaced_pod_log()  → K8s API
+```
 
-**Possible causes:**
+**Possible causes (in order of likelihood):**
 
-### A. Container name mismatch
-The logs API hardcodes `container="sandbox"` (`kubernetes_service.py:1041`). If the pod's container is named differently, the K8s API will fail.
+### A. RBAC — missing `pods/log` permission
+The server's service account may lack permission to read pod logs. The task APIs work because they go through `execd` (exec into pod → HTTP to localhost:44772), not through the K8s logs API.
+
+**Verify:**
+```bash
+kubectl auth can-i get pods/log \
+  --as=system:serviceaccount:<namespace>:<sa-name> \
+  -n <sandbox-namespace>
+```
+
+### B. Container name mismatch
+The logs API hardcodes `container="sandbox"` (`kubernetes_service.py:1041`). If the pod's main container has a different name, the K8s API will fail.
 
 **Verify:**
 ```bash
 kubectl get pod -l opensandbox.io/id=4e535c1e-cebd-4635-9ba6-7af38eef1cff \
   -o jsonpath='{.items[*].spec.containers[*].name}'
+# Expected: "sandbox" (set in agent_sandbox_provider.py:364)
 ```
 
-### B. RBAC — missing `pods/log` permission
-The server's service account may lack permission to read pod logs.
-
-**Verify:**
-```bash
-kubectl auth can-i get pods/log --as=system:serviceaccount:<namespace>:<sa-name>
-```
-
-### C. No error handling around `read_pod_log`
-`get_sandbox_logs()` in `kubernetes_service.py:1025-1044` has no `try/except` — any K8s API exception propagates as an unhandled 500. Compare with `get_endpoint()` which wraps K8s calls in try/except.
+### C. No error handling — generic 500 hides real error
+`get_sandbox_logs()` in `kubernetes_service.py:1025-1044` has **no try/except** around the `read_pod_log` call. Any K8s API exception (RBAC denial, timeout, etc.) propagates as an unhandled 500 with no useful detail. Compare with `get_endpoint()` which properly wraps K8s calls.
 
 **Fix (code):**
 ```python
@@ -127,6 +163,34 @@ def get_sandbox_logs(self, sandbox_id, tail_lines=100, follow=False):
 
 ---
 
+## Architecture Overview
+
+```
+                        ┌─────────────────────────────────┐
+                        │         APISIX Gateway          │
+                        │       (sandbox-gateway)         │
+                        └──────┬──────────────┬───────────┘
+                               │              │
+              sandbox.superagii.com    sandbox.dev.superagi.com
+                               │              │
+                               ▼              ▼
+                    ┌──────────────┐   ┌──────────────────┐
+                    │  FastAPI     │   │  Ingress Proxy   │
+                    │  API Server  │   │  (Go, NOT       │
+                    │              │   │   DEPLOYED)      │
+                    └──────┬───────┘   └──────────────────┘
+                           │
+                           │ K8s API
+                           ▼
+                    ┌──────────────┐
+                    │  Sandbox Pod │
+                    │  (port 8080) │
+                    │  ✅ WORKING  │
+                    └──────────────┘
+```
+
+---
+
 ## What IS Working
 
 | Component | Status |
@@ -138,15 +202,17 @@ def get_sandbox_logs(self, sandbox_id, tail_lines=100, follow=False):
 | Task logs | OK |
 | HTTP server inside sandbox (port 8080) | OK |
 | Endpoint resolution API | OK (returns URL + headers) |
-| Ingress routing (APISIX) | NOT WORKING (404) |
-| Proxy routing (APISIX) | NOT WORKING (301 redirect) |
-| Pod logs API | NOT WORKING (500) |
+| Ingress proxy deployment | **NOT DEPLOYED** |
+| Ingress routing via `sandbox.dev.superagi.com` | **NOT WORKING** (APISIX 404 — no upstream) |
+| Proxy routing via `/sandboxes/{id}/proxy/8080/` | **NOT WORKING** (APISIX 301 redirect) |
+| Pod logs API | **NOT WORKING** (500 — likely RBAC or missing error handling) |
 
 ---
 
-## Recommended Investigation Order
+## Recommended Fix Order
 
-1. **APISIX routes** — check if header-based routing rules exist for `OpenSandbox-Ingress-To`. This is the core issue blocking external sandbox access.
-2. **APISIX route priority** — ensure API server routes aren't being hijacked by ingress redirect rules (fixes proxy 301).
-3. **Pod logs RBAC** — verify service account permissions for `pods/log`.
-4. **Add error handling** — wrap `read_pod_log` in try/except to get proper error messages instead of generic 500.
+1. **Deploy the ingress proxy** (`components/ingress/`) — this is the core blocker for external sandbox access via `sandbox.dev.superagi.com`
+2. **Configure APISIX upstream** for `sandbox.dev.superagi.com` → ingress proxy service
+3. **Fix APISIX route priority** — stop intercepting `/sandboxes/*/proxy/*` paths so the FastAPI proxy handler works as a fallback
+4. **Fix pod logs RBAC** — grant `pods/log` read permission to the server's service account
+5. **Add error handling** to `get_sandbox_logs()` — wrap `read_pod_log` in try/except for proper error messages
