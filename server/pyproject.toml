@@ -50,7 +50,7 @@ dependencies = [
     "pydantic-settings",
     "pyyaml",
     "tomli; python_version < \"3.11\"",
-    "uvicorn",
+    "uvicorn[standard]",
 ]
 
 [project.urls]
