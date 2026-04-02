@@ -718,6 +718,26 @@ class Endpoint(BaseModel):
 
 
 # ============================================================================
+# Terminal Token
+# ============================================================================
+
+class TerminalTokenResponse(BaseModel):
+    """
+    Response from requesting a terminal access token.
+    """
+    url: str = Field(..., description="WebSocket URL for the terminal connection")
+    token: str = Field(..., description="Signed JWT token for authenticating the terminal session")
+    expires_at: int = Field(
+        ...,
+        alias="expiresAt",
+        description="Unix timestamp when the token expires",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================================
 # Error Response
 # ============================================================================
 

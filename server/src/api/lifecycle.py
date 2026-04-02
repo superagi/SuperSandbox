@@ -40,12 +40,15 @@ from src.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
     SandboxFilter,
+    TerminalTokenResponse,
     UpdateSandboxEnvRequest,
     UpdateSandboxEnvResponse,
     UpdateSandboxResourceLimitsRequest,
     UpdateSandboxResourceLimitsResponse,
 )
+from src.config import get_config
 from src.services.factory import create_sandbox_service
+from src.services.terminal_auth import create_terminal_token, validate_terminal_token
 
 # RFC 2616 Section 13.5.1
 HOP_BY_HOP_HEADERS = {
@@ -636,21 +639,79 @@ async def get_sandbox_logs(
         return Response(content=logs, media_type="text/plain; charset=utf-8")
 
 
+@router.post(
+    "/sandboxes/{sandbox_id}/terminal/token",
+    response_model=TerminalTokenResponse,
+    responses={
+        200: {"description": "Terminal access token"},
+        404: {"model": ErrorResponse, "description": "Sandbox not found"},
+    },
+)
+async def get_terminal_token(
+    sandbox_id: str,
+    request: Request,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+):
+    """
+    Generate a short-lived JWT token for authenticating a WebSocket terminal session.
+
+    The returned token must be passed as a query parameter when connecting to the
+    WebSocket terminal endpoint: `ws://<host>/sandboxes/{sandbox_id}/terminal?token=<token>`
+    """
+    _touch_sandbox_activity(sandbox_id)
+    # Verify sandbox exists and is running
+    sb = sandbox_service.get_sandbox(sandbox_id)
+    if sb is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": f"Sandbox {sandbox_id} not found"},
+        )
+
+    cfg = get_config()
+    secret = cfg.server.terminal_token_secret
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": "INTERNAL_ERROR", "message": "Terminal token secret not configured"},
+        )
+
+    ttl = cfg.server.terminal_token_ttl_seconds
+    token, expires_at = create_terminal_token(secret, sandbox_id, ttl_seconds=ttl)
+
+    # Build the WebSocket URL from the request
+    ws_scheme = "wss" if request.url.scheme == "https" else "ws"
+    ws_url = f"{ws_scheme}://{request.url.netloc}/sandboxes/{sandbox_id}/terminal?token={token}"
+
+    return TerminalTokenResponse(url=ws_url, token=token, expiresAt=expires_at)
+
+
 @router.websocket("/sandboxes/{sandbox_id}/terminal")
-async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
+async def sandbox_terminal(websocket: WebSocket, sandbox_id: str, token: Optional[str] = Query(None)):
     """
     Interactive WebSocket terminal to a sandbox pod.
 
     Opens an interactive bash shell (PTY) in the sandbox container via WebSocket.
 
-    - Connect: `ws://<host>/sandboxes/{sandbox_id}/terminal`
+    - Connect: `ws://<host>/sandboxes/{sandbox_id}/terminal?token=<jwt>`
     - Send: text messages (keystrokes)
     - Receive: text messages (terminal output including ANSI escape codes)
-    - Close codes: 1008 (sandbox not found/paused), 1011 (internal error)
+    - Close codes: 1008 (sandbox not found/paused/auth failed), 1011 (internal error)
 
     Compatible with xterm.js or any WebSocket terminal emulator.
     Returns close frame with reason if sandbox is not running.
     """
+    # Validate JWT token before accepting the connection
+    cfg = get_config()
+    secret = cfg.server.terminal_token_secret
+    if secret:
+        if not token:
+            await websocket.close(code=1008, reason="Missing terminal token")
+            return
+        err = validate_terminal_token(secret, token, sandbox_id)
+        if err:
+            await websocket.close(code=1008, reason=err[:123])
+            return
+
     await websocket.accept()
     _touch_sandbox_activity(sandbox_id)
 

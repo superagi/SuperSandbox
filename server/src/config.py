@@ -194,6 +194,16 @@ class ServerConfig(BaseModel):
             "Omit from config to disable the server-side upper bound."
         ),
     )
+    terminal_token_secret: Optional[str] = Field(
+        default=None,
+        description="HMAC secret for signing terminal JWT tokens. Must be at least 16 characters.",
+        min_length=16,
+    )
+    terminal_token_ttl_seconds: int = Field(
+        default=300,
+        ge=30,
+        description="Time-to-live in seconds for terminal access tokens.",
+    )
 
 
 class KubernetesRuntimeConfig(BaseModel):
