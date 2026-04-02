@@ -38,6 +38,8 @@ from src.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
     SandboxStatus,
+    UpdateSandboxEnvRequest,
+    UpdateSandboxEnvResponse,
     UpdateSandboxResourceLimitsRequest,
     UpdateSandboxResourceLimitsResponse,
 )
@@ -753,6 +755,73 @@ class KubernetesSandboxService(SandboxService):
                 detail={
                     "code": SandboxErrorCodes.K8S_RESOURCE_UPDATE_FAILED,
                     "message": f"Failed to update resource limits: {str(e)}",
+                },
+            ) from e
+
+    def update_env(
+        self,
+        sandbox_id: str,
+        request: UpdateSandboxEnvRequest,
+    ) -> UpdateSandboxEnvResponse:
+        """
+        Update environment variables on a running or paused sandbox.
+
+        Patches the CRD pod template so:
+        - Running sandbox: env takes effect on next pod restart
+        - Paused sandbox: env is applied when resumed (controller recreates pod from CRD spec)
+        """
+        try:
+            workload = self.workload_provider.get_workload(
+                sandbox_id=sandbox_id,
+                namespace=self.namespace,
+            )
+            if not workload:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                        "message": f"Sandbox '{sandbox_id}' not found",
+                    },
+                )
+
+            status_info = self.workload_provider.get_status(workload)
+            if status_info["state"] not in ("Running", "Paused"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_INVALID_STATE,
+                        "message": (
+                            f"Cannot update env in state '{status_info['state']}'. "
+                            "Must be Running or Paused."
+                        ),
+                    },
+                )
+
+            # Filter out None values
+            clean_env = {k: (v or "") for k, v in request.env.items()}
+
+            self.workload_provider.update_env(
+                sandbox_id=sandbox_id,
+                namespace=self.namespace,
+                env=clean_env,
+            )
+
+            logger.info("Updated env for sandbox %s: %d vars", sandbox_id, len(clean_env))
+
+            return UpdateSandboxEnvResponse(
+                id=sandbox_id,
+                env=clean_env,
+            )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating env for {sandbox_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_RESOURCE_UPDATE_FAILED,
+                    "message": f"Failed to update environment variables: {str(e)}",
                 },
             ) from e
 

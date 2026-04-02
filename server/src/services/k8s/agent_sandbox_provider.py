@@ -500,6 +500,53 @@ class AgentSandboxProvider(WorkloadProvider):
             body=patch_body,
         )
 
+    def update_env(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        env: Dict[str, str],
+    ) -> None:
+        """Update environment variables on an AgentSandbox workload."""
+        sandbox = self.get_workload(sandbox_id, namespace)
+        if not sandbox:
+            raise Exception(f"Sandbox {sandbox_id} not found")
+
+        spec = sandbox.get("spec", {})
+        pod_template = spec.get("podTemplate", spec.get("template", {}))
+        pod_spec = pod_template.get("spec", {})
+        containers = pod_spec.get("containers", [])
+
+        if not containers:
+            raise Exception("No containers found in Sandbox spec")
+
+        # Build new env array from user env + preserve EXECD
+        env_list = [{"name": k, "value": v or ""} for k, v in env.items()]
+        env_list.append({"name": "EXECD", "value": "/opt/opensandbox/bin/execd"})
+
+        template_key = "podTemplate" if "podTemplate" in spec else "template"
+
+        patched_container = dict(containers[0])
+        patched_container["env"] = env_list
+
+        patch_body = {
+            "spec": {
+                template_key: {
+                    "spec": {
+                        "containers": [patched_container]
+                    }
+                }
+            }
+        }
+
+        self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=sandbox["metadata"]["name"],
+            body=patch_body,
+        )
+
     def pause_workload(self, sandbox_id: str, namespace: str) -> None:
         """Pause a sandbox by scaling replicas to 0."""
         sandbox = self.get_workload(sandbox_id, namespace)

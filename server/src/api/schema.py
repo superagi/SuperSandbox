@@ -667,6 +667,39 @@ class UpdateSandboxResourceLimitsResponse(BaseModel):
 
 
 # ============================================================================
+# Update Environment Variables
+# ============================================================================
+
+class UpdateSandboxEnvRequest(BaseModel):
+    """
+    Request body for PUT /sandboxes/{id}/env to update environment variables.
+
+    Replaces all user-defined environment variables on the sandbox.
+    Internal env vars (e.g. EXECD) are preserved automatically.
+    """
+
+    env: Dict[str, Optional[str]] = Field(
+        ...,
+        description="Environment variables to set. Replaces all existing user-defined env vars.",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class UpdateSandboxEnvResponse(BaseModel):
+    """
+    Response from updating sandbox environment variables.
+    """
+
+    id: str = Field(..., description="Unique sandbox identifier")
+    env: Dict[str, str] = Field(
+        ...,
+        description="Current environment variables after update",
+    )
+
+
+# ============================================================================
 # Endpoint
 # ============================================================================
 

@@ -218,6 +218,27 @@ class WorkloadProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def update_env(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        env: Dict[str, str],
+    ) -> None:
+        """
+        Update environment variables on a workload.
+
+        Patches the CRD pod template with the new env vars.
+        Internal env vars (e.g. EXECD) are preserved automatically.
+        On resume, the controller creates new pods with the updated env.
+
+        Args:
+            sandbox_id: Unique sandbox identifier
+            namespace: Kubernetes namespace
+            env: New user-defined environment variables (replaces existing)
+        """
+        pass
+
     def supports_image_auth(self) -> bool:
         """
         Whether this provider supports per-request image pull authentication.

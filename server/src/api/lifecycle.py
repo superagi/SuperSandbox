@@ -40,6 +40,8 @@ from src.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
     SandboxFilter,
+    UpdateSandboxEnvRequest,
+    UpdateSandboxEnvResponse,
     UpdateSandboxResourceLimitsRequest,
     UpdateSandboxResourceLimitsResponse,
 )
@@ -284,6 +286,42 @@ async def update_sandbox_resource_limits(
         UpdateSandboxResourceLimitsResponse: Updated sandbox state and resource limits
     """
     return sandbox_service.update_resource_limits(sandbox_id, request)
+
+
+@router.put(
+    "/sandboxes/{sandbox_id}/env",
+    response_model=UpdateSandboxEnvResponse,
+    responses={
+        200: {"description": "Environment variables updated successfully"},
+        404: {"model": ErrorResponse, "description": "Sandbox not found"},
+        409: {"model": ErrorResponse, "description": "Sandbox in a state that doesn't allow updates"},
+        501: {"model": ErrorResponse, "description": "Runtime does not support env updates"},
+        500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
+    },
+)
+async def update_sandbox_env(
+    sandbox_id: str,
+    request: UpdateSandboxEnvRequest,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
+) -> UpdateSandboxEnvResponse:
+    """
+    Update environment variables on a running or paused sandbox.
+
+    Replaces all user-defined environment variables on the sandbox CRD.
+    Internal env vars (e.g. EXECD) are preserved automatically.
+
+    - Running sandbox: env is patched in the CRD. Takes full effect on next pod restart.
+    - Paused sandbox: env is patched in the CRD. Applied when the sandbox is resumed.
+
+    Args:
+        sandbox_id: Unique sandbox identifier
+        request: Env update request with new env vars
+        x_request_id: Unique request identifier for tracing (optional).
+
+    Returns:
+        UpdateSandboxEnvResponse: Updated environment variables
+    """
+    return sandbox_service.update_env(sandbox_id, request)
 
 
 # ============================================================================
