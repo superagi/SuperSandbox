@@ -745,6 +745,50 @@ class BatchSandboxProvider(WorkloadProvider):
             body=patch_body,
         )
 
+    def update_env(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        env: Dict[str, str],
+    ) -> None:
+        """Update environment variables on a BatchSandbox workload."""
+        batchsandbox = self.get_workload(sandbox_id, namespace)
+        if not batchsandbox:
+            raise Exception(f"BatchSandbox for sandbox {sandbox_id} not found")
+
+        spec = batchsandbox.get("spec", {})
+        template = spec.get("template", {})
+        pod_spec = template.get("spec", {})
+        containers = pod_spec.get("containers", [])
+
+        if not containers:
+            raise Exception("No containers found in BatchSandbox spec")
+
+        env_list = [{"name": k, "value": v or ""} for k, v in env.items()]
+        env_list.append({"name": "EXECD", "value": "/opt/opensandbox/bin/execd"})
+
+        patched_container = dict(containers[0])
+        patched_container["env"] = env_list
+
+        patch_body = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [patched_container]
+                    }
+                }
+            }
+        }
+
+        self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=batchsandbox["metadata"]["name"],
+            body=patch_body,
+        )
+
     def pause_workload(self, sandbox_id: str, namespace: str) -> None:
         """Pause is not supported for BatchSandbox provider."""
         raise NotImplementedError("Pause is not supported for BatchSandbox provider")

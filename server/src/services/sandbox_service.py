@@ -33,6 +33,8 @@ from src.api.schema import (
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
     Sandbox,
+    UpdateSandboxEnvRequest,
+    UpdateSandboxEnvResponse,
     UpdateSandboxResourceLimitsRequest,
     UpdateSandboxResourceLimitsResponse,
 )
@@ -287,6 +289,27 @@ class SandboxService(ABC):
     @abstractmethod
     def kill_task(self, sandbox_id: str, task_id: str) -> None:
         """Kill a running task."""
+        pass
+
+    @abstractmethod
+    def update_env(
+        self,
+        sandbox_id: str,
+        request: UpdateSandboxEnvRequest,
+    ) -> UpdateSandboxEnvResponse:
+        """
+        Update environment variables on a running or paused sandbox.
+
+        Args:
+            sandbox_id: Unique sandbox identifier
+            request: Env update request
+
+        Returns:
+            UpdateSandboxEnvResponse: Updated env vars
+
+        Raises:
+            HTTPException: If sandbox not found, invalid state, or update fails
+        """
         pass
 
     @abstractmethod

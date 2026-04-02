@@ -1811,6 +1811,16 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
     def kill_task(self, sandbox_id, task_id):
         raise NotImplementedError("Tasks are not yet implemented for Docker runtime")
 
+    def update_env(self, sandbox_id, request):
+        """Environment variable updates are not supported for Docker runtime."""
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail={
+                "code": SandboxErrorCodes.API_NOT_SUPPORTED,
+                "message": "Updating environment variables is not supported for Docker runtime",
+            },
+        )
+
     def update_resource_limits(self, sandbox_id, request):
         """Resource limit updates are not supported for Docker runtime."""
         raise HTTPException(
