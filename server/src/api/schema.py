@@ -718,6 +718,27 @@ class Endpoint(BaseModel):
 
 
 # ============================================================================
+# Terminal Token
+# ============================================================================
+
+class TerminalTokenResponse(BaseModel):
+    """Response containing a short-lived JWT for WebSocket terminal access."""
+
+    url: str = Field(
+        ...,
+        description="WebSocket URL to connect to the terminal (includes the token as query param)",
+    )
+    token: str = Field(
+        ...,
+        description="Short-lived JWT token for authenticating the WebSocket connection",
+    )
+    expires_at: int = Field(
+        ...,
+        description="Unix timestamp when the token expires",
+    )
+
+
+# ============================================================================
 # Error Response
 # ============================================================================
 

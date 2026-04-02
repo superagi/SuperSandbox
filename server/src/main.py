@@ -232,7 +232,7 @@ async def health_check():
     return {"status": "healthy"}
 
 
-_SENSITIVE_KEYS = {"api_key", "kubeconfig_path", "password"}
+_SENSITIVE_KEYS = {"api_key", "kubeconfig_path", "password", "terminal_token_secret"}
 
 
 def _redact(obj):

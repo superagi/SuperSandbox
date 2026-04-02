@@ -194,6 +194,21 @@ class ServerConfig(BaseModel):
             "Omit from config to disable the server-side upper bound."
         ),
     )
+    terminal_token_secret: Optional[str] = Field(
+        default=None,
+        description=(
+            "Secret key used to sign JWT tokens for WebSocket terminal access. "
+            "When set, the terminal WebSocket endpoint requires a valid JWT token. "
+            "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        ),
+        min_length=16,
+    )
+    terminal_token_ttl_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="TTL in seconds for terminal access JWT tokens (default: 300 = 5 minutes).",
+    )
 
 
 class KubernetesRuntimeConfig(BaseModel):

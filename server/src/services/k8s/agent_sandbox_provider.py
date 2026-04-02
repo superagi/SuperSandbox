@@ -155,11 +155,17 @@ class AgentSandboxProvider(WorkloadProvider):
                 sandbox_id,
             )
 
+        # Extract storage from resource_limits for PVC sizing (not a container resource)
+        workspace_size = self._workspace_volume_size
+        container_resource_limits = dict(resource_limits) if resource_limits else {}
+        if "storage" in container_resource_limits:
+            workspace_size = container_resource_limits.pop("storage")
+
         pod_spec = self._build_pod_spec(
             image_spec=image_spec,
             entrypoint=entrypoint,
             env=env,
-            resource_limits=resource_limits,
+            resource_limits=container_resource_limits,
             execd_image=execd_image,
             network_policy=network_policy,
             egress_image=egress_image,
@@ -175,7 +181,7 @@ class AgentSandboxProvider(WorkloadProvider):
         self.k8s_client.create_pvc(
             namespace=namespace,
             name=pvc_name,
-            storage_size=self._workspace_volume_size,
+            storage_size=workspace_size,
             labels={SANDBOX_ID_LABEL: sandbox_id},
         )
         pod_spec["volumes"].append({

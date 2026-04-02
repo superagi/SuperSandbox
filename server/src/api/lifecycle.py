@@ -40,12 +40,15 @@ from src.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
     SandboxFilter,
+    TerminalTokenResponse,
     UpdateSandboxEnvRequest,
     UpdateSandboxEnvResponse,
     UpdateSandboxResourceLimitsRequest,
     UpdateSandboxResourceLimitsResponse,
 )
+from src.config import get_config
 from src.services.factory import create_sandbox_service
+from src.services.terminal_auth import create_terminal_token, validate_terminal_token
 
 # RFC 2616 Section 13.5.1
 HOP_BY_HOP_HEADERS = {
@@ -636,6 +639,58 @@ async def get_sandbox_logs(
         return Response(content=logs, media_type="text/plain; charset=utf-8")
 
 
+@router.post(
+    "/sandboxes/{sandbox_id}/terminal/token",
+    response_model=TerminalTokenResponse,
+    responses={
+        200: {"description": "Terminal access token issued"},
+        403: {"model": ErrorResponse, "description": "Terminal auth not configured"},
+        404: {"model": ErrorResponse, "description": "Sandbox not found"},
+    },
+    summary="Issue a short-lived JWT for WebSocket terminal access",
+    tags=["Terminal"],
+)
+async def create_terminal_access_token(
+    request: Request,
+    sandbox_id: str,
+):
+    """
+    Issue a short-lived JWT token for authenticating a WebSocket terminal connection.
+
+    The returned token must be passed as a `token` query parameter when connecting
+    to the WebSocket terminal endpoint. The token is scoped to the specific sandbox
+    and expires after the configured TTL (default: 5 minutes).
+
+    Requires the server to have `terminal_token_secret` configured.
+    """
+    config = get_config()
+    secret = config.server.terminal_token_secret
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "TERMINAL_AUTH_NOT_CONFIGURED",
+                "message": "Terminal token authentication is not configured on this server.",
+            },
+        )
+
+    # Verify sandbox exists before issuing a token
+    sandbox_service.get_sandbox(sandbox_id)
+
+    token, exp = create_terminal_token(
+        secret=secret,
+        sandbox_id=sandbox_id,
+        ttl_seconds=config.server.terminal_token_ttl_seconds,
+    )
+
+    # Build WebSocket URL
+    host = request.headers.get("host", f"{config.server.host}:{config.server.port}")
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    ws_url = f"{scheme}://{host}/sandboxes/{sandbox_id}/terminal?token={token}"
+
+    return TerminalTokenResponse(url=ws_url, token=token, expires_at=exp)
+
+
 @router.websocket("/sandboxes/{sandbox_id}/terminal")
 async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
     """
@@ -643,14 +698,27 @@ async def sandbox_terminal(websocket: WebSocket, sandbox_id: str):
 
     Opens an interactive bash shell (PTY) in the sandbox container via WebSocket.
 
-    - Connect: `ws://<host>/sandboxes/{sandbox_id}/terminal`
+    - Connect: `ws://<host>/sandboxes/{sandbox_id}/terminal?token=<jwt>`
     - Send: text messages (keystrokes)
     - Receive: text messages (terminal output including ANSI escape codes)
-    - Close codes: 1008 (sandbox not found/paused), 1011 (internal error)
+    - Close codes: 1008 (sandbox not found/paused/auth failed), 1011 (internal error)
 
-    Compatible with xterm.js or any WebSocket terminal emulator.
-    Returns close frame with reason if sandbox is not running.
+    When terminal_token_secret is configured, a valid JWT token (from the
+    POST /terminal/token endpoint) must be provided as a `token` query parameter.
     """
+    # --- JWT authentication (when configured) ---
+    config = get_config()
+    secret = config.server.terminal_token_secret
+    if secret:
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=1008, reason="Missing terminal access token")
+            return
+        error = validate_terminal_token(secret, token, expected_sandbox_id=sandbox_id)
+        if error:
+            await websocket.close(code=1008, reason=error[:123])
+            return
+
     await websocket.accept()
     _touch_sandbox_activity(sandbox_id)
 

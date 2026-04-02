@@ -48,6 +48,7 @@ dependencies = [
     "kubernetes",
     "pydantic",
     "pydantic-settings",
+    "PyJWT>=2.8.0",
     "pyyaml",
     "tomli; python_version < \"3.11\"",
     "uvicorn",
