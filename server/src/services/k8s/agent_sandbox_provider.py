@@ -284,7 +284,7 @@ class AgentSandboxProvider(WorkloadProvider):
                 }
             ],
             "nodeSelector": {
-                "kubernetes.io/arch": "amd64",
+                "kubernetes.io/arch": "arm64",
             },
         }
 
