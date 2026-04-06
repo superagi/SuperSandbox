@@ -93,6 +93,7 @@ sandbox_service = create_sandbox_service()
 )
 async def create_sandbox(
     request: CreateSandboxRequest,
+    wait: bool = Query(True, description="When false, return immediately with Pending status and provision in the background. Poll GET /sandboxes/{id} for readiness."),
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> CreateSandboxResponse:
     """
@@ -102,8 +103,14 @@ async def create_sandbox(
     environment variables, and metadata. Sandboxes are provisioned directly from
     the specified image without requiring a pre-created template.
 
+    When ``wait=false``, the sandbox is created asynchronously: the endpoint
+    returns immediately with ``Pending`` status and the caller should poll
+    ``GET /sandboxes/{id}`` until the status transitions to ``Running``
+    (or ``Failed``).
+
     Args:
         request: Sandbox creation request
+        wait: If True (default), block until sandbox is running. If False, return immediately.
         x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
 
     Returns:
@@ -112,8 +119,9 @@ async def create_sandbox(
     Raises:
         HTTPException: If sandbox creation scheduling fails
     """
-
-    return sandbox_service.create_sandbox(request)
+    if wait:
+        return sandbox_service.create_sandbox(request)
+    return sandbox_service.create_sandbox_async(request)
 
 
 # Search endpoint

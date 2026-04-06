@@ -346,7 +346,7 @@ class KubernetesSandboxService(SandboxService):
                 sandbox_id,
                 workload_info.get("name"),
             )
-            
+
             # Wait for Pod to be Running with IP
             try:
                 workload = self._wait_for_sandbox_ready(
@@ -354,10 +354,10 @@ class KubernetesSandboxService(SandboxService):
                     timeout_seconds=self.app_config.kubernetes.sandbox_create_timeout_seconds,
                     poll_interval_seconds=self.app_config.kubernetes.sandbox_create_poll_interval_seconds,
                 )
-                
+
                 # Get final status
                 status_info = self.workload_provider.get_status(workload)
-                
+
                 # Build and return response with Running state
                 return CreateSandboxResponse(
                     id=sandbox_id,
@@ -373,7 +373,7 @@ class KubernetesSandboxService(SandboxService):
                     image=request.image,
                     entrypoint=request.entrypoint,
                 )
-                
+
             except HTTPException:
                 # Clean up on failure
                 try:
@@ -382,7 +382,7 @@ class KubernetesSandboxService(SandboxService):
                 except Exception as cleanup_ex:
                     logger.error(f"Failed to cleanup sandbox {sandbox_id}", exc_info=cleanup_ex)
                 raise
-            
+
         except HTTPException:
             raise
         except ValueError as e:
@@ -404,7 +404,130 @@ class KubernetesSandboxService(SandboxService):
                     "message": f"Failed to create sandbox: {str(e)}",
                 },
             ) from e
-    
+
+    def create_sandbox_async(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+        """
+        Create a new sandbox asynchronously using Kubernetes.
+
+        Creates the workload but does NOT wait for the Pod to become Running.
+        Returns immediately with Pending status. The caller should poll
+        ``GET /sandboxes/{id}`` until the status transitions to Running
+        (or Failed).
+        """
+        # Validate request
+        ensure_entrypoint(request.entrypoint)
+        ensure_metadata_labels(request.metadata)
+        ensure_timeout_within_limit(
+            request.timeout,
+            self.app_config.server.max_sandbox_timeout_seconds,
+        )
+        self._ensure_network_policy_support(request)
+        self._ensure_image_auth_support(request)
+
+        # Generate sandbox ID
+        sandbox_id = self.generate_sandbox_id()
+
+        # Calculate expiration time
+        created_at = datetime.now(timezone.utc)
+        expires_at = None
+        if request.timeout is not None:
+            expires_at = calculate_expiration_or_raise(created_at, request.timeout)
+
+        # Build labels
+        labels = {
+            SANDBOX_ID_LABEL: sandbox_id,
+            SANDBOX_LAST_ACTIVITY_AT_LABEL: str(int(created_at.timestamp())),
+        }
+        annotations: Dict[str, str] = {}
+        if expires_at is None:
+            labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"
+
+        # Add user metadata as labels
+        if request.metadata:
+            labels.update(request.metadata)
+
+        # Extract resource limits
+        resource_limits = {}
+        if request.resource_limits and request.resource_limits.root:
+            resource_limits = request.resource_limits.root
+
+        try:
+            # Get egress image if network policy is provided
+            egress_image = None
+            egress_auth_token = None
+            if request.network_policy:
+                egress_image = self.app_config.egress.image if self.app_config.egress else None
+                egress_auth_token = generate_egress_token()
+                annotations[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_auth_token
+
+            # Validate volumes before creating workload
+            ensure_volumes_valid(
+                request.volumes,
+                self.app_config.storage.allowed_host_paths or None,
+            )
+
+            # Create workload (but don't wait for it to be ready)
+            workload_info = self.workload_provider.create_workload(
+                sandbox_id=sandbox_id,
+                namespace=self.namespace,
+                image_spec=request.image,
+                entrypoint=request.entrypoint,
+                env=request.env or {},
+                resource_limits=resource_limits,
+                labels=labels,
+                annotations=annotations or None,
+                expires_at=expires_at,
+                execd_image=self.execd_image,
+                extensions=request.extensions,
+                network_policy=request.network_policy,
+                egress_image=egress_image,
+                egress_auth_token=egress_auth_token,
+                volumes=request.volumes,
+            )
+
+            logger.info(
+                "Created sandbox (async): id=%s, workload=%s",
+                sandbox_id,
+                workload_info.get("name"),
+            )
+
+            # Return immediately with Pending status
+            return CreateSandboxResponse(
+                id=sandbox_id,
+                status=SandboxStatus(
+                    state="Pending",
+                    reason="PROVISIONING",
+                    message="Sandbox creation in progress. Poll GET /sandboxes/{id} for status.",
+                    last_transition_at=created_at,
+                ),
+                created_at=created_at,
+                expires_at=expires_at,
+                metadata=request.metadata,
+                image=request.image,
+                entrypoint=request.entrypoint,
+            )
+
+        except HTTPException:
+            raise
+        except ValueError as e:
+            logger.error(f"Invalid parameters for sandbox creation: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": str(e),
+                },
+            ) from e
+        except Exception as e:
+            logger.error(f"Error creating sandbox (async): {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_API_ERROR,
+                    "message": f"Failed to create sandbox: {str(e)}",
+                },
+            ) from e
+
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         """
         Get sandbox by ID.

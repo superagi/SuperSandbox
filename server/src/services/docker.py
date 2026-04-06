@@ -35,7 +35,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from threading import Lock, Timer
+from threading import Lock, Thread, Timer
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -784,6 +784,59 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
         pvc_inspect_cache = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
         return self._provision_sandbox(sandbox_id, request, created_at, expires_at, pvc_inspect_cache)
+
+    def create_sandbox_async(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+        """
+        Create a new sandbox asynchronously using Docker.
+
+        Validates the request, registers a Pending sandbox, and starts
+        provisioning in a background thread.  The caller should poll
+        ``GET /sandboxes/{id}`` until the status transitions to Running
+        (or Failed).
+        """
+        ensure_entrypoint(request.entrypoint)
+        ensure_metadata_labels(request.metadata)
+        ensure_timeout_within_limit(
+            request.timeout,
+            self.app_config.server.max_sandbox_timeout_seconds,
+        )
+        self._ensure_network_policy_support(request)
+        self._validate_network_exists()
+        pvc_inspect_cache = self._validate_volumes(request)
+        sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
+
+        # Register as pending so GET /sandboxes/{id} can return it immediately
+        pending_status = SandboxStatus(
+            state="Pending",
+            reason="PROVISIONING",
+            message="Sandbox creation in progress.",
+            last_transition_at=created_at,
+        )
+        with self._pending_lock:
+            self._pending_sandboxes[sandbox_id] = PendingSandbox(
+                request=request,
+                created_at=created_at,
+                expires_at=expires_at,
+                status=pending_status,
+            )
+
+        # Kick off provisioning in background thread
+        thread = Thread(
+            target=self._async_provision_worker,
+            args=(sandbox_id, request, created_at, expires_at, pvc_inspect_cache),
+            daemon=True,
+            name=f"sandbox-provision-{sandbox_id}",
+        )
+        thread.start()
+
+        return CreateSandboxResponse(
+            id=sandbox_id,
+            status=pending_status,
+            metadata=request.metadata,
+            expiresAt=expires_at,
+            createdAt=created_at,
+            entrypoint=request.entrypoint,
+        )
 
     def _async_provision_worker(
         self,

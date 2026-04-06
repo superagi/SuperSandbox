@@ -108,7 +108,9 @@ class SandboxService(ABC):
     @abstractmethod
     def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
-        Create a new sandbox from a container image.
+        Create a new sandbox from a container image (synchronous).
+
+        Blocks until the sandbox is fully provisioned and running.
 
         Args:
             request: Sandbox creation request
@@ -118,6 +120,27 @@ class SandboxService(ABC):
 
         Raises:
             HTTPException: If sandbox creation fails
+        """
+        pass
+
+    @abstractmethod
+    def create_sandbox_async(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+        """
+        Create a new sandbox asynchronously (non-blocking).
+
+        Validates the request, kicks off provisioning in the background,
+        and returns immediately with status ``Pending``.  The caller should
+        poll ``GET /sandboxes/{id}`` until the status transitions to
+        ``Running`` (or ``Failed``).
+
+        Args:
+            request: Sandbox creation request
+
+        Returns:
+            CreateSandboxResponse: Response with ``Pending`` status and sandbox id
+
+        Raises:
+            HTTPException: If request validation or initial setup fails
         """
         pass
 
