@@ -68,21 +68,15 @@ jobs:
         run: |
           COMPONENT="${{ steps.vars.outputs.component }}"
 
-          ALL='[
-            {"name":"execd",      "dockerfile":"components/execd/Dockerfile",   "context":".","build_args":""},
-            {"name":"egress",     "dockerfile":"components/egress/Dockerfile",  "context":".","build_args":""},
-            {"name":"ingress",    "dockerfile":"components/ingress/Dockerfile", "context":".","build_args":""},
-            {"name":"server",     "dockerfile":"server/Dockerfile",             "context":"server/","build_args":""},
-            {"name":"controller", "dockerfile":"kubernetes/Dockerfile",         "context":"kubernetes/","build_args":"PACKAGE=cmd/controller/main.go"}
-          ]'
+          ALL='[{"name":"execd","dockerfile":"components/execd/Dockerfile","context":".","build_args":""},{"name":"egress","dockerfile":"components/egress/Dockerfile","context":".","build_args":""},{"name":"ingress","dockerfile":"components/ingress/Dockerfile","context":".","build_args":""},{"name":"server","dockerfile":"server/Dockerfile","context":"server/","build_args":""},{"name":"controller","dockerfile":"kubernetes/Dockerfile","context":"kubernetes/","build_args":"PACKAGE=cmd/controller/main.go"}]'
 
           if [[ "$COMPONENT" == "all" ]]; then
-            MATRIX="$ALL"
+            MATRIX=$(echo "$ALL" | jq -c '.')
           else
             MATRIX=$(echo "$ALL" | jq -c "[.[] | select(.name == \"$COMPONENT\")]")
           fi
 
-          echo "matrix={\"include\":$MATRIX}" >> $GITHUB_OUTPUT
+          echo "matrix={\"include\":$(echo $MATRIX)}" >> $GITHUB_OUTPUT
 
   # ──────────────────────────────────────────────
   # Build & push component images (parallel matrix)
