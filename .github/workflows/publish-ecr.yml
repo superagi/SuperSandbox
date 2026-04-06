@@ -39,12 +39,60 @@ env:
 
 jobs:
   # ──────────────────────────────────────────────
-  # Build & push component images
+  # Determine which components to build
   # ──────────────────────────────────────────────
-  publish-images:
+  resolve-matrix:
     runs-on: ubuntu-latest
     if: |
       !startsWith(github.ref, 'refs/tags/helm/')
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - name: Parse tag and set variables
+        id: vars
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_PATH="${GITHUB_REF#refs/tags/}"
+            COMPONENT=$(echo "$TAG_PATH" | cut -d'/' -f2)
+            IMAGE_TAG=$(echo "$TAG_PATH" | cut -d'/' -f3)
+          else
+            COMPONENT="${{ inputs.component }}"
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          fi
+          echo "component=$COMPONENT" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build matrix
+        id: set-matrix
+        run: |
+          COMPONENT="${{ steps.vars.outputs.component }}"
+
+          ALL='[
+            {"name":"execd",      "dockerfile":"components/execd/Dockerfile",   "context":".","build_args":""},
+            {"name":"egress",     "dockerfile":"components/egress/Dockerfile",  "context":".","build_args":""},
+            {"name":"ingress",    "dockerfile":"components/ingress/Dockerfile", "context":".","build_args":""},
+            {"name":"server",     "dockerfile":"server/Dockerfile",             "context":"server/","build_args":""},
+            {"name":"controller", "dockerfile":"kubernetes/Dockerfile",         "context":"kubernetes/","build_args":"PACKAGE=cmd/controller/main.go"}
+          ]'
+
+          if [[ "$COMPONENT" == "all" ]]; then
+            MATRIX="$ALL"
+          else
+            MATRIX=$(echo "$ALL" | jq -c "[.[] | select(.name == \"$COMPONENT\")]")
+          fi
+
+          echo "matrix={\"include\":$MATRIX}" >> $GITHUB_OUTPUT
+
+  # ──────────────────────────────────────────────
+  # Build & push component images (parallel matrix)
+  # ──────────────────────────────────────────────
+  publish-images:
+    needs: resolve-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout code
@@ -59,23 +107,11 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Parse tag and set variables
-        id: vars
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_PATH="${GITHUB_REF#refs/tags/}"
-            COMPONENT=$(echo "$TAG_PATH" | cut -d'/' -f2)
-            IMAGE_TAG=$(echo "$TAG_PATH" | cut -d'/' -f3)
-          else
-            COMPONENT="${{ inputs.component }}"
-            IMAGE_TAG="${{ inputs.image_tag }}"
-          fi
-
-          echo "component=$COMPONENT" >> $GITHUB_OUTPUT
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Free disk space
         run: |
@@ -83,81 +119,25 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: Build and push execd
-        if: steps.vars.outputs.component == 'execd' || steps.vars.outputs.component == 'all'
+      - name: Build and push ${{ matrix.name }}
         env:
-          TAG: ${{ steps.vars.outputs.image_tag }}
+          TAG: ${{ needs.resolve-matrix.outputs.image_tag }}
         run: |
-          REPO="${{ env.ECR_REGISTRY }}/supersandbox/execd"
+          REPO="${{ env.ECR_REGISTRY }}/supersandbox/${{ matrix.name }}"
           TAGS="-t ${REPO}:${TAG}"
           [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
 
-          docker buildx build \
-            --platform linux/amd64 \
-            $TAGS \
-            -f components/execd/Dockerfile \
-            --push .
-
-      - name: Build and push egress
-        if: steps.vars.outputs.component == 'egress' || steps.vars.outputs.component == 'all'
-        env:
-          TAG: ${{ steps.vars.outputs.image_tag }}
-        run: |
-          REPO="${{ env.ECR_REGISTRY }}/supersandbox/egress"
-          TAGS="-t ${REPO}:${TAG}"
-          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
+          BUILD_ARGS=""
+          if [[ -n "${{ matrix.build_args }}" ]]; then
+            BUILD_ARGS="--build-arg ${{ matrix.build_args }}"
+          fi
 
           docker buildx build \
-            --platform linux/amd64 \
+            --platform linux/amd64,linux/arm64 \
+            $BUILD_ARGS \
             $TAGS \
-            -f components/egress/Dockerfile \
-            --push .
-
-      - name: Build and push ingress
-        if: steps.vars.outputs.component == 'ingress' || steps.vars.outputs.component == 'all'
-        env:
-          TAG: ${{ steps.vars.outputs.image_tag }}
-        run: |
-          REPO="${{ env.ECR_REGISTRY }}/supersandbox/ingress"
-          TAGS="-t ${REPO}:${TAG}"
-          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
-
-          docker buildx build \
-            --platform linux/amd64 \
-            $TAGS \
-            -f components/ingress/Dockerfile \
-            --push .
-
-      - name: Build and push server
-        if: steps.vars.outputs.component == 'server' || steps.vars.outputs.component == 'all'
-        env:
-          TAG: ${{ steps.vars.outputs.image_tag }}
-        run: |
-          REPO="${{ env.ECR_REGISTRY }}/supersandbox/server"
-          TAGS="-t ${REPO}:${TAG}"
-          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
-
-          docker buildx build \
-            --platform linux/amd64 \
-            $TAGS \
-            -f server/Dockerfile \
-            --push server/
-
-      - name: Build and push controller
-        if: steps.vars.outputs.component == 'controller' || steps.vars.outputs.component == 'all'
-        env:
-          TAG: ${{ steps.vars.outputs.image_tag }}
-        run: |
-          REPO="${{ env.ECR_REGISTRY }}/supersandbox/controller"
-          TAGS="-t ${REPO}:${TAG}"
-          [[ "$TAG" == v* ]] && TAGS="$TAGS -t ${REPO}:latest"
-
-          docker buildx build \
-            --platform linux/amd64 \
-            --build-arg PACKAGE=cmd/controller/main.go \
-            $TAGS \
-            -f kubernetes/Dockerfile \
-            --push kubernetes/
+            -f ${{ matrix.dockerfile }} \
+            --push ${{ matrix.context }}
 
 
   # ──────────────────────────────────────────────
